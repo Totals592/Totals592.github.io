@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>IPTV Player</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+
+<style>
+body {
+  margin: 0;
+  font-family: Arial;
+  background: #0b1220;
+  color: white;
+  display: flex;
+  height: 100vh;
+}
+
+.sidebar {
+  width: 320px;
+  background: #111827;
+  overflow-y: auto;
+  padding: 10px;
+}
+
+.channel {
+  padding: 8px;
+  border-bottom: 1px solid #222;
+  cursor: pointer;
+}
+
+.channel:hover {
+  background: #1f2937;
+}
+
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+video {
+  width: 100%;
+  height: 60%;
+  background: black;
+}
+
+.topbar {
+  padding: 10px;
+  background: #0f172a;
+}
+
+input {
+  width: 80%;
+  padding: 8px;
+}
+button {
+  padding: 8px 12px;
+}
+</style>
+</head>
+
+<body>
+
+<div class="sidebar" id="list"></div>
+
+<div class="main">
+  <div class="topbar">
+    <input id="search" placeholder="Search channels..." />
+    <button onclick="load()">Reload</button>
+  </div>
+
+  <video id="video" controls></video>
+</div>
+
+<script>
+const playlistURL = "https://iptv-org.github.io/iptv/index.m3u";
+
+let channels = [];
+
+async function load() {
+  const res = await fetch(playlistURL);
+  const text = await res.text();
+
+  const lines = text.split("\n");
+  channels = [];
+
+  let currentName = "";
+
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith("#EXTINF")) {
+      currentName = lines[i].split(",")[1];
+    }
+
+    if (lines[i].startsWith("http")) {
+      channels.push({
+        name: currentName,
+        url: lines[i]
+      });
+    }
+  }
+
+  render(channels);
+}
+
+function render(list) {
+  const div = document.getElementById("list");
+  div.innerHTML = "";
+
+  list.forEach(ch => {
+    const el = document.createElement("div");
+    el.className = "channel";
+    el.innerText = ch.name;
+
+    el.onclick = () => play(ch.url);
+
+    div.appendChild(el);
+  });
+}
+
+function play(url) {
+  const video = document.getElementById("video");
+
+  if (window.hls) {
+    window.hls.destroy();
+  }
+
+  if (Hls.isSupported()) {
+    window.hls = new Hls();
+    window.hls.loadSource(url);
+    window.hls.attachMedia(video);
+    window.hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      video.play();
+    });
+  } else {
+    video.src = url;
+    video.play();
+  }
+}
+
+// search
+document.getElementById("search").addEventListener("input", (e) => {
+  const q = e.target.value.toLowerCase();
+  render(channels.filter(c => c.name.toLowerCase().includes(q)));
+});
+
+load();
+</script>
+
+</body>
+</html>
