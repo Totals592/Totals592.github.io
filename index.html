@@ -17,6 +17,23 @@
     <button id="updateBtn">Update now</button>
   </div>
 
+  <!-- Per-tenant staff login (gates the till) -->
+  <div class="login-back" id="loginBack">
+    <div class="login-card">
+      <div class="brand" style="justify-content:center;font-size:22px;margin-bottom:6px"><img src="./icons/icon.svg" alt=""> Totals POS</div>
+      <p class="muted center" style="margin-top:0">Sign in to your shop</p>
+      <label>Shop</label>
+      <select id="loginTenant"></select>
+      <label>Username</label>
+      <input id="loginUser" autocomplete="username" placeholder="e.g. manager">
+      <label>PIN</label>
+      <input id="loginPin" type="password" inputmode="numeric" autocomplete="current-password" placeholder="PIN">
+      <div id="loginErr" class="login-err"></div>
+      <button class="charge" id="loginBtn" style="margin-top:14px">Sign in</button>
+      <p class="hint center" id="loginHint" style="margin-top:14px"></p>
+    </div>
+  </div>
+
   <div class="app">
     <!-- Top bar -->
     <header class="topbar">
@@ -24,7 +41,9 @@
       <div class="tenant-pick">
         <span class="pill" id="netPill"><span class="dot" id="netDot"></span><span id="netText">…</span></span>
         <span class="pill" id="syncPill" title="Pending items waiting to reach the cloud"><span class="dot" id="syncDot"></span><span id="syncText">Local</span></span>
-        <select id="tenantSelect" title="Active shop / tenant"></select>
+        <span class="pill" id="tenantChip" title="Active shop">🏬 <span id="tenantName">—</span></span>
+        <span class="pill" id="userChip" title="Signed-in staff">👤 <span id="userName">—</span></span>
+        <button class="btn small ghost" id="signOutBtn">Sign out</button>
       </div>
     </header>
 
@@ -174,6 +193,16 @@
               <button class="btn brand" id="saveApiBtn">Save</button>
               <button class="btn" id="syncNowBtn">Sync now</button>
               <span class="pill"><span class="dot" id="syncDot2"></span><span id="lastSync">—</span></span>
+            </div>
+          </div>
+          <div class="card" id="staffCard">
+            <div class="section-title"><h3>Staff for this shop</h3><button class="btn small brand" id="addStaffBtn">+ Staff</button></div>
+            <p class="muted">People who can sign in to this shop's till. Managers can edit inventory &amp; settings; cashiers can sell.</p>
+            <div class="table-wrap">
+              <table class="data" id="staffTable">
+                <thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th></th></tr></thead>
+                <tbody></tbody>
+              </table>
             </div>
           </div>
           <div class="card">

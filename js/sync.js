@@ -83,8 +83,10 @@ window.Sync = (function () {
     (out.tenants || []).forEach(upsertTenant);
     (out.products || []).forEach(upsertProduct);
     (out.variations || []).forEach(upsertVariation);
+    (out.staff || []).forEach(upsertStaff);
     if (out.cursor) DB.setSetting('sync_cursor', out.cursor);
-    return { pulled: (out.tenants || []).length + (out.products || []).length + (out.variations || []).length };
+    return { pulled: (out.tenants || []).length + (out.products || []).length +
+                     (out.variations || []).length + (out.staff || []).length };
   }
 
   // Upserts apply "last write wins" using updated_at so remote edits win only
@@ -125,6 +127,15 @@ window.Sync = (function () {
       [v.id, v.product_id, v.tenant_id, v.name, v.sku, v.barcode, v.price, v.cost, v.stock,
        v.track_stock ?? 1, v.low_stock_threshold ?? 5, v.supplier_id, v.active ?? 1,
        v.updated_at || DB.nowISO(), v.created_at || DB.nowISO()]);
+  }
+  function upsertStaff(s) {
+    if (!newer(s, 'staff')) return;
+    DB.run(`INSERT INTO staff(id,tenant_id,name,username,pin_hash,salt,role,active,updated_at,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name,username=excluded.username,pin_hash=excluded.pin_hash,
+        salt=excluded.salt,role=excluded.role,active=excluded.active,updated_at=excluded.updated_at`,
+      [s.id, s.tenant_id, s.name, (s.username || '').toLowerCase(), s.pin_hash, s.salt,
+       s.role || 'cashier', s.active ?? 1, s.updated_at || DB.nowISO(), s.created_at || DB.nowISO()]);
   }
 
   /* ---------- Orchestration ---------- */

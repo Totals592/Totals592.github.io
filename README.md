@@ -6,8 +6,10 @@ and optional cloud sync — all served straight from GitHub Pages.
 
 > **Live app:** https://totals592.github.io
 > **First run:** a demo shop with products, SKUs and a supplier is created
-> automatically so you can start selling immediately. Admin PIN: **`1234`**
-> (change it in Settings).
+> automatically so you can start selling immediately.
+> **Demo logins:** `manager` / `1234` (full access) · `cashier` / `4321`
+> (sell only). Device admin PIN for the fleet/tenant panel: **`1234`**.
+> Change all of these before going live (Settings → Staff, Settings → Admin PIN).
 
 ---
 
@@ -53,10 +55,17 @@ sale can be reprinted from **Reports**.
 - Restock / stock-take dialog, CSV export.
 - Upload a **product photo** (auto-downscaled to keep the local DB small).
 
-### Multi-tenant
-- One install can hold many shops/tenants; switch the active tenant from the top
-  bar. Each tenant has its own products, suppliers, sales, currency, VAT rules
-  and receipt branding.
+### Multi-tenant & per-tenant login
+- One install can hold many shops/tenants. Each tenant has its own products,
+  suppliers, sales, currency, VAT rules, receipt branding **and staff**.
+- A **login screen gates the till**: staff sign in to their shop with a username
+  and PIN (PINs stored salted-and-hashed, never in plaintext). The signed-in
+  name prints on receipts.
+- Two roles: **Manager** (full access — inventory, suppliers, settings, staff)
+  and **Cashier** (sell + reports only). Managers add/disable their own staff in
+  **Settings → Staff**; the device admin can manage any shop's staff from the
+  **Admin** tab. Staff sync across registers like everything else.
+- The session persists across reloads; **Sign out** returns to the login screen.
 
 ### Admin control panel
 - PIN-protected **Admin** tab to **create, rename, configure, suspend or

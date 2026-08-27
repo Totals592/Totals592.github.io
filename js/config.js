@@ -60,10 +60,39 @@ window.Config = (function () {
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
+  /* Staff credential hashing (PINs are never stored in the clear) ----------*/
+  function randomSalt() {
+    const a = new Uint8Array(12); crypto.getRandomValues(a);
+    return Array.from(a).map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  async function hashPin(pin, salt) {
+    const data = new TextEncoder().encode(String(salt) + ':' + String(pin));
+    const buf = await crypto.subtle.digest('SHA-256', data);
+    return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  /* Login session (device-local, not part of the synced database) ----------*/
+  const SESSION_KEY = 'totals_session';
+  function currentSession() {
+    try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch (e) { return null; }
+  }
+  function setSession(s) {
+    if (s) localStorage.setItem(SESSION_KEY, JSON.stringify(s));
+    else localStorage.removeItem(SESSION_KEY);
+  }
+
+  // Cashier name shown on receipts = the signed-in staff member.
+  function cashierNameResolved() {
+    const s = currentSession();
+    return (s && s.name) || cashierName();
+  }
+  function currentRole() { const s = currentSession(); return (s && s.role) || 'cashier'; }
+
   return {
     CURRENCY_SYMBOLS, money, vatBreakdown,
     activeTenantId, activeTenant, setActiveTenant,
-    apiBase, deviceName, cashierName, adminPin,
-    nextReceiptNo, escapeHtml
+    apiBase, deviceName, cashierName: cashierNameResolved, adminPin,
+    nextReceiptNo, escapeHtml,
+    randomSalt, hashPin, currentSession, setSession, currentRole
   };
 })();
