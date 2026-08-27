@@ -25,6 +25,11 @@ window.Receipt = (function () {
       ? `VAT (${sale.vat_rate}% incl.)`
       : `VAT (${sale.vat_rate}%)`;
 
+    // A line prints only if it applies AND the shop chose to show it.
+    const showVat = Number(sale.vat_amount) > 0 && tenant.vat_show_receipt !== 0;
+    const showSvc = Number(sale.service_charge) > 0 && tenant.service_charge_show_receipt !== 0;
+    const svcLabel = `Service charge (${sale.service_charge_rate || 0}%)`;
+
     return `
     <div class="rcpt">
       <div class="hdr">
@@ -50,7 +55,8 @@ window.Receipt = (function () {
       <div class="rule"></div>
       <div class="totals">
         <div><span>Subtotal (net)</span><span>${Config.money(sale.subtotal - 0, c)}</span></div>
-        <div><span>${vatLabel}</span><span>${Config.money(sale.vat_amount, c)}</span></div>
+        ${showVat ? `<div><span>${vatLabel}</span><span>${Config.money(sale.vat_amount, c)}</span></div>` : ''}
+        ${showSvc ? `<div><span>${svcLabel}</span><span>${Config.money(sale.service_charge, c)}</span></div>` : ''}
         <div class="grand"><span>TOTAL</span><span>${Config.money(sale.total, c)}</span></div>
         <div><span>Cash</span><span>${Config.money(sale.cash_received, c)}</span></div>
         <div><span>Change</span><span>${Config.money(sale.change_due, c)}</span></div>
@@ -58,7 +64,7 @@ window.Receipt = (function () {
       <div class="rule"></div>
       <div class="ftr">
         <div>${e(tenant.receipt_footer || 'Thank you!')}</div>
-        <div class="small">Price is VAT ${sale.vat_inclusive ? 'inclusive' : 'exclusive'}. This is your official receipt.</div>
+        ${showVat ? `<div class="small">Price is VAT ${sale.vat_inclusive ? 'inclusive' : 'exclusive'}. This is your official receipt.</div>` : '<div class="small">This is your official receipt.</div>'}
         <div class="small">Powered by Totals POS</div>
       </div>
     </div>`;

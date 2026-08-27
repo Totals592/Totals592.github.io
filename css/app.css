@@ -37,8 +37,11 @@ a { color: var(--brand); }
   display: flex; align-items: center; gap: 12px; padding: 10px 14px;
   background: linear-gradient(180deg, #16233b, #101a2e); border-bottom: 1px solid var(--line);
 }
-.brand { display: flex; align-items: center; gap: 10px; font-weight: 800; letter-spacing: .3px; }
-.brand img { width: 30px; height: 30px; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 800; letter-spacing: .3px;
+  background: transparent; border: none; color: inherit; font-size: inherit; font-family: inherit; padding: 0; cursor: pointer; }
+.brand img { width: 30px; height: 30px; border-radius: 7px; object-fit: cover; }
+label.switch { display: flex; align-items: center; gap: 8px; color: var(--ink); margin: 12px 0 2px; cursor: pointer; }
+label.switch input { width: auto; }
 .tenant-pick { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 .tenant-pick select { width: auto; min-width: 180px; }
 .pill {
