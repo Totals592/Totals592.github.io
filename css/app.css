@@ -177,6 +177,15 @@ table.data th { color: var(--muted); font-weight: 600; position: sticky; top: 0;
 .update-banner.show { display: flex; }
 .update-banner button { background: #3a2600; color: #fff; border: none; padding: 6px 14px; border-radius: 8px; font-weight: 700; }
 
+/* ---------- Login ---------- */
+.login-back { position: fixed; inset: 0; z-index: 80; display: none; align-items: center; justify-content: center;
+  padding: 18px; background: radial-gradient(1200px 600px at 50% -10%, #16233b, var(--bg)); }
+.login-back.open { display: flex; }
+.login-card { width: 100%; max-width: 360px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 18px; padding: 22px; box-shadow: var(--shadow); }
+.login-err { color: #fca5a5; font-size: 13px; min-height: 18px; margin-top: 8px; text-align: center; }
+.hidden-role { display: none !important; }
+
 .muted { color: var(--muted); }
 .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .thumb { width: 40px; height: 40px; border-radius: 8px; object-fit: cover; background: var(--panel-2); border: 1px solid var(--line); }

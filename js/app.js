@@ -626,6 +626,7 @@
         <td>${statusBadge}</td>
         <td><div class="row-actions">
           <button class="btn small" data-edittenant="${t.id}">Edit</button>
+          <button class="btn small" data-stafftenant="${t.id}">Staff</button>
           <button class="btn small" data-usetenant="${t.id}">Open</button>
           <button class="btn small ${t.status === 'suspended' ? 'brand' : 'danger'}" data-toggletenant="${t.id}">${t.status === 'suspended' ? 'Activate' : 'Suspend'}</button>
         </div></td>
@@ -666,7 +667,7 @@
       <div class="foot"><button class="btn ghost" data-close>Cancel</button><button class="btn brand" id="tSave">Save</button></div>`, true);
     const m = $('#modal');
     $$('[data-close]', m).forEach((b) => b.addEventListener('click', closeModal));
-    $('#tSave', m).addEventListener('click', () => {
+    $('#tSave', m).addEventListener('click', async () => {
       const name = $('#tName', m).value.trim();
       if (!name) { toast('Business name required', 'err'); return; }
       const now = DB.nowISO();
@@ -686,24 +687,237 @@
         DB.run(`INSERT INTO tenants(id,name,tin,slug,phone,email,address,currency,vat_rate,vat_inclusive,status,receipt_footer,updated_at,created_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           [id, vals.name, vals.tin, vals.slug, vals.phone, vals.email, vals.address, vals.currency, vals.vat_rate, vals.vat_inclusive, vals.status, vals.receipt_footer, now, now]);
+        // Give a brand-new shop a default manager login (change the PIN after).
+        await createStaff(id, { name: 'Manager', username: 'manager', pin: '1234', role: 'manager' });
       }
       Sync.queue('tenant', id, editing ? 'update' : 'create', Object.assign({ id }, vals), id);
       DB.persistNow();
-      closeModal(); populateTenants(); renderAdmin();
-      toast(editing ? 'Tenant updated' : 'Tenant created', 'ok');
+      closeModal(); updateTopbar(); renderAdmin();
+      toast(editing ? 'Tenant updated' : 'Tenant created — default login manager / 1234', 'ok');
     });
   }
 
-  /* ---------------- Tenant selector ---------------- */
-  function populateTenants() {
-    const sel = $('#tenantSelect');
-    const tenants = DB.all("SELECT * FROM tenants WHERE status != 'suspended' ORDER BY name");
-    const active = Config.activeTenantId();
-    sel.innerHTML = tenants.map((t) => `<option value="${t.id}" ${t.id === active ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
-    // If active tenant got suspended, fall back to first available.
-    if (tenants.length && !tenants.find((t) => t.id === active)) {
-      Config.setActiveTenant(tenants[0].id); sel.value = tenants[0].id;
+  /* ---------------- Authentication & sessions ---------------- */
+
+  // Tabs a cashier may not open. Managers/admins see everything.
+  const MANAGER_TABS = ['inventory', 'suppliers', 'settings'];
+
+  function activeTenants() {
+    return DB.all("SELECT * FROM tenants WHERE status != 'suspended' ORDER BY name");
+  }
+
+  function populateLoginTenants() {
+    const sel = $('#loginTenant');
+    const tenants = activeTenants();
+    sel.innerHTML = tenants.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join('') ||
+      '<option value="">No active shops — ask an administrator</option>';
+    // Preselect last used tenant if still available.
+    const last = DB.getSetting('active_tenant_id');
+    if (last && tenants.find((t) => t.id === last)) sel.value = last;
+    // Show demo credentials only while the seeded shop still uses defaults.
+    const hint = $('#loginHint');
+    const seeded = DB.get("SELECT COUNT(*) AS n FROM staff WHERE username IN ('manager','cashier')");
+    hint.textContent = (seeded && seeded.n > 0) ? 'Demo logins — manager / 1234 · cashier / 4321' : '';
+  }
+
+  function updateTopbar() {
+    const s = Config.currentSession();
+    const t = Config.activeTenant();
+    $('#tenantName').textContent = t ? t.name : '—';
+    $('#userName').textContent = s ? (s.name + ' · ' + (s.role || 'cashier')) : '—';
+  }
+
+  // Hide manager-only tabs for cashiers; keep the current view valid.
+  function applyRoleGating() {
+    const role = Config.currentRole();
+    const isManager = role === 'manager' || role === 'admin';
+    MANAGER_TABS.forEach((v) => {
+      const tab = document.querySelector('.tab[data-view="' + v + '"]');
+      if (tab) tab.classList.toggle('hidden-role', !isManager);
+    });
+    // Admin tab stays visible for everyone (still gated by the device PIN).
+    if (!isManager) {
+      const active = document.querySelector('.tab.active');
+      if (active && MANAGER_TABS.includes(active.dataset.view)) switchView('pos');
     }
+    // The per-shop Staff card is manager-only.
+    const staffCard = $('#staffCard'); if (staffCard) staffCard.style.display = isManager ? '' : 'none';
+  }
+
+  function showLogin() {
+    populateLoginTenants();
+    $('#loginErr').textContent = '';
+    $('#loginPin').value = '';
+    $('#loginBack').classList.add('open');
+    setTimeout(() => $('#loginUser').focus(), 50);
+  }
+  function hideLogin() { $('#loginBack').classList.remove('open'); }
+
+  async function attemptLogin() {
+    const tid = $('#loginTenant').value;
+    const user = $('#loginUser').value.trim().toLowerCase();
+    const pin = $('#loginPin').value;
+    const err = $('#loginErr');
+    if (!tid) { err.textContent = 'No shop selected.'; return; }
+    if (!user || !pin) { err.textContent = 'Enter your username and PIN.'; return; }
+    const staff = DB.get('SELECT * FROM staff WHERE tenant_id = ? AND lower(username) = ? AND active = 1', [tid, user]);
+    if (!staff) { err.textContent = 'Unknown user for this shop.'; return; }
+    const hash = await Config.hashPin(pin, staff.salt);
+    if (hash !== staff.pin_hash) { err.textContent = 'Incorrect PIN.'; return; }
+    signInAs({ tenant_id: tid, staff_id: staff.id, name: staff.name, role: staff.role });
+  }
+
+  function signInAs(session) {
+    Config.setSession(session);
+    Config.setActiveTenant(session.tenant_id);
+    DB.persistNow();
+    hideLogin();
+    cart = [];
+    applyRoleGating();
+    updateTopbar();
+    renderPOS(); renderCart();
+    switchView('pos');
+    toast('Signed in — ' + session.name, 'ok');
+  }
+
+  function signOut() {
+    Config.setSession(null);
+    cart = [];
+    updateTopbar();
+    showLogin();
+  }
+
+  // Returns true if a stored session is still valid (tenant active, staff ok).
+  function restoreSession() {
+    const s = Config.currentSession();
+    if (!s) return false;
+    const t = DB.get("SELECT * FROM tenants WHERE id = ? AND status != 'suspended'", [s.tenant_id]);
+    if (!t) return false;
+    if (s.admin) { Config.setActiveTenant(s.tenant_id); return true; } // device-admin override
+    const staff = DB.get('SELECT * FROM staff WHERE id = ? AND active = 1', [s.staff_id]);
+    if (!staff) return false;
+    Config.setActiveTenant(s.tenant_id);
+    return true;
+  }
+
+  /* ---------------- Staff management ---------------- */
+  async function createStaff(tenantId, d) {
+    const salt = Config.randomSalt();
+    const hash = await Config.hashPin(d.pin, salt);
+    const now = DB.nowISO(); const id = DB.uid('stf');
+    DB.run(`INSERT INTO staff(id,tenant_id,name,username,pin_hash,salt,role,active,updated_at,created_at)
+            VALUES(?,?,?,?,?,?,?,1,?,?)`,
+      [id, tenantId, d.name, d.username.toLowerCase(), hash, salt, d.role, now, now]);
+    Sync.queue('staff', id, 'create',
+      { id, tenant_id: tenantId, name: d.name, username: d.username.toLowerCase(),
+        pin_hash: hash, salt, role: d.role, active: 1, updated_at: now, created_at: now }, tenantId);
+    return id;
+  }
+
+  // Render the staff table for a tenant (defaults to the active shop, used by
+  // Settings). The Admin tab passes an explicit tenant.
+  function renderStaff(tenantId) {
+    const tid = tenantId || Config.activeTenantId();
+    const rows = DB.all('SELECT * FROM staff WHERE tenant_id = ? ORDER BY role DESC, name', [tid]);
+    const body = $('#staffTable tbody'); if (!body) return;
+    body.innerHTML = rows.map((r) => `<tr>
+      <td>${esc(r.name)}</td><td>${esc(r.username)}</td>
+      <td><span class="badge">${esc(r.role)}</span></td>
+      <td>${r.active ? '<span class="badge ok">Active</span>' : '<span class="badge">Disabled</span>'}</td>
+      <td><div class="row-actions">
+        <button class="btn small" data-editstaff="${r.id}">Edit</button>
+        <button class="btn small danger" data-delstaff="${r.id}">${r.active ? 'Disable' : 'Enable'}</button>
+      </div></td>
+    </tr>`).join('') || '<tr><td colspan="5" class="muted center">No staff yet.</td></tr>';
+    body.dataset.tenant = tid;
+  }
+
+  function staffModal(tenantId, staffId, after) {
+    const editing = !!staffId;
+    const s = editing ? DB.get('SELECT * FROM staff WHERE id = ?', [staffId]) : { role: 'cashier' };
+    openModal(`
+      <header><h3>${editing ? 'Edit' : 'New'} staff member</h3><button class="x" data-close>×</button></header>
+      <div class="body">
+        <label>Full name</label><input id="stName" value="${esc(s.name || '')}">
+        <div class="grid2">
+          <div><label>Username</label><input id="stUser" value="${esc(s.username || '')}" ${editing ? 'disabled' : ''}></div>
+          <div><label>Role</label><select id="stRole">
+            <option value="cashier" ${s.role === 'cashier' ? 'selected' : ''}>Cashier (sell only)</option>
+            <option value="manager" ${s.role === 'manager' ? 'selected' : ''}>Manager (full access)</option>
+          </select></div>
+        </div>
+        <label>${editing ? 'New PIN (leave blank to keep current)' : 'PIN'}</label>
+        <input id="stPin" type="password" inputmode="numeric" placeholder="${editing ? '••••' : 'PIN'}">
+      </div>
+      <div class="foot"><button class="btn ghost" data-close>Cancel</button><button class="btn brand" id="stSave">Save</button></div>`);
+    const m = $('#modal');
+    $$('[data-close]', m).forEach((b) => b.addEventListener('click', closeModal));
+    $('#stSave', m).addEventListener('click', async () => {
+      const name = $('#stName', m).value.trim();
+      const user = $('#stUser', m).value.trim().toLowerCase();
+      const role = $('#stRole', m).value;
+      const pin = $('#stPin', m).value;
+      if (!name || (!editing && !user)) { toast('Name and username required', 'err'); return; }
+      const now = DB.nowISO();
+      if (editing) {
+        let hash = s.pin_hash, salt = s.salt;
+        if (pin) { salt = Config.randomSalt(); hash = await Config.hashPin(pin, salt); }
+        DB.run('UPDATE staff SET name=?,role=?,pin_hash=?,salt=?,active=1,updated_at=? WHERE id=?',
+          [name, role, hash, salt, now, staffId]);
+        Sync.queue('staff', staffId, 'update',
+          { id: staffId, tenant_id: s.tenant_id, name, role, pin_hash: hash, salt, active: 1, updated_at: now }, s.tenant_id);
+      } else {
+        // Enforce unique username within the tenant.
+        const dupe = DB.get('SELECT id FROM staff WHERE tenant_id=? AND lower(username)=? AND active=1', [tenantId, user]);
+        if (dupe) { toast('That username is taken', 'err'); return; }
+        if (!pin) { toast('PIN required', 'err'); return; }
+        await createStaff(tenantId, { name, username: user, pin, role });
+      }
+      DB.persistNow(); closeModal();
+      if (after) after(); else renderStaff(tenantId);
+      toast('Saved', 'ok');
+    });
+  }
+
+  function toggleStaff(staffId, after) {
+    const s = DB.get('SELECT * FROM staff WHERE id = ?', [staffId]);
+    // Never disable the last active manager of a tenant.
+    if (s.active && s.role === 'manager') {
+      const mgrs = DB.get("SELECT COUNT(*) AS n FROM staff WHERE tenant_id=? AND role='manager' AND active=1", [s.tenant_id]);
+      if (mgrs && mgrs.n <= 1) { toast('Keep at least one active manager', 'err'); return; }
+    }
+    const na = s.active ? 0 : 1; const now = DB.nowISO();
+    DB.run('UPDATE staff SET active=?, updated_at=? WHERE id=?', [na, now, staffId]);
+    Sync.queue('staff', staffId, 'update', { id: staffId, tenant_id: s.tenant_id, active: na, updated_at: now }, s.tenant_id);
+    DB.persistNow();
+    if (after) after(); else renderStaff(s.tenant_id);
+  }
+
+  // Admin-side staff manager: a self-contained modal for any tenant.
+  function adminStaffModal(tenantId) {
+    const t = DB.get('SELECT * FROM tenants WHERE id = ?', [tenantId]);
+    const rows = DB.all('SELECT * FROM staff WHERE tenant_id = ? ORDER BY role DESC, name', [tenantId]);
+    const rerender = () => adminStaffModal(tenantId);
+    openModal(`
+      <header><h3>Staff · ${esc(t.name)}</h3><button class="x" data-close>×</button></header>
+      <div class="body">
+        <div class="toolbar"><button class="btn brand small" id="aAddStaff">+ Staff</button></div>
+        <div class="table-wrap"><table class="data"><thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rows.map((r) => `<tr>
+          <td>${esc(r.name)}</td><td>${esc(r.username)}</td><td><span class="badge">${esc(r.role)}</span></td>
+          <td>${r.active ? '<span class="badge ok">Active</span>' : '<span class="badge">Disabled</span>'}</td>
+          <td><div class="row-actions">
+            <button class="btn small" data-astaffedit="${r.id}">Edit</button>
+            <button class="btn small danger" data-astafftog="${r.id}">${r.active ? 'Disable' : 'Enable'}</button>
+          </div></td></tr>`).join('') || '<tr><td colspan="5" class="muted center">No staff yet.</td></tr>'}
+        </tbody></table></div>
+      </div>
+      <div class="foot"><button class="btn ghost" data-close>Close</button></div>`, true);
+    const m = $('#modal');
+    $$('[data-close]', m).forEach((b) => b.addEventListener('click', closeModal));
+    $('#aAddStaff', m).addEventListener('click', () => staffModal(tenantId, null, rerender));
+    $$('[data-astaffedit]', m).forEach((b) => b.addEventListener('click', () => staffModal(tenantId, b.dataset.astaffedit, rerender)));
+    $$('[data-astafftog]', m).forEach((b) => b.addEventListener('click', () => toggleStaff(b.dataset.astafftog, rerender)));
   }
 
   /* ---------------- Status pills ---------------- */
@@ -753,9 +967,10 @@
 
   function loadSettings() {
     $('#setDevice').value = Config.deviceName();
-    $('#setCashier').value = Config.cashierName();
+    $('#setCashier').value = DB.getSetting('cashier_name') || '';
     $('#setAdminPin').value = Config.adminPin();
     $('#setApiBase').value = DB.getSetting('api_base') || '';
+    renderStaff();
     updateSyncPill();
   }
 
@@ -764,12 +979,11 @@
     // Tabs
     $('#tabs').addEventListener('click', (e) => { const b = e.target.closest('.tab'); if (b) switchView(b.dataset.view); });
 
-    // Tenant switch
-    $('#tenantSelect').addEventListener('change', (e) => {
-      Config.setActiveTenant(e.target.value); DB.persistNow();
-      cart = []; renderCart(); renderPOS();
-      toast('Switched to ' + Config.activeTenant().name);
-    });
+    // Login / sign out
+    $('#loginBtn').addEventListener('click', attemptLogin);
+    $('#loginPin').addEventListener('keydown', (e) => { if (e.key === 'Enter') attemptLogin(); });
+    $('#loginUser').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#loginPin').focus(); });
+    $('#signOutBtn').addEventListener('click', signOut);
 
     // POS delegation
     $('#tiles').addEventListener('click', (e) => { const b = e.target.closest('[data-prod]'); if (b) pickProduct(b.dataset.prod); });
@@ -825,19 +1039,33 @@
     $('#addTenantBtn').addEventListener('click', () => tenantModal(null));
     $('#tenantSearch').addEventListener('input', (e) => { tenantFilter = e.target.value; renderAdmin(); });
     $('#tenantTable').addEventListener('click', (e) => {
-      const ed = e.target.closest('[data-edittenant]'); const use = e.target.closest('[data-usetenant]'); const tog = e.target.closest('[data-toggletenant]');
+      const ed = e.target.closest('[data-edittenant]'); const use = e.target.closest('[data-usetenant]');
+      const tog = e.target.closest('[data-toggletenant]'); const stf = e.target.closest('[data-stafftenant]');
       if (ed) tenantModal(ed.dataset.edittenant);
-      if (use) { Config.setActiveTenant(use.dataset.usetenant); populateTenants(); cart = []; renderCart(); renderPOS(); switchView('pos'); toast('Now selling as ' + Config.activeTenant().name); }
+      if (stf) adminStaffModal(stf.dataset.stafftenant);
+      // "Open" signs in with a device-admin override (full access, no PIN reprompt).
+      if (use) {
+        const t = DB.get('SELECT * FROM tenants WHERE id=?', [use.dataset.usetenant]);
+        signInAs({ tenant_id: t.id, admin: true, role: 'admin', name: 'Administrator' });
+      }
       if (tog) {
         const t = DB.get('SELECT * FROM tenants WHERE id=?', [tog.dataset.toggletenant]);
         const ns = t.status === 'suspended' ? 'active' : 'suspended';
         DB.run('UPDATE tenants SET status=?, updated_at=? WHERE id=?', [ns, DB.nowISO(), t.id]);
         Sync.queue('tenant', t.id, 'update', { id: t.id, status: ns }, t.id);
-        DB.persistNow(); populateTenants(); renderAdmin(); toast('Tenant ' + ns);
+        DB.persistNow(); updateTopbar(); renderAdmin(); toast('Tenant ' + ns);
       }
     });
 
-    // Settings
+    // Settings — staff (manager-managed, current shop)
+    $('#addStaffBtn').addEventListener('click', () => staffModal(Config.activeTenantId(), null, () => renderStaff()));
+    $('#staffTable').addEventListener('click', (e) => {
+      const ed = e.target.closest('[data-editstaff]'); const del = e.target.closest('[data-delstaff]');
+      if (ed) staffModal(Config.activeTenantId(), ed.dataset.editstaff, () => renderStaff());
+      if (del) toggleStaff(del.dataset.delstaff, () => renderStaff());
+    });
+
+    // Settings — device
     $('#saveDeviceBtn').addEventListener('click', () => {
       DB.setSetting('device_name', $('#setDevice').value.trim() || 'Register 1');
       DB.setSetting('cashier_name', $('#setCashier').value.trim() || 'Cashier');
@@ -911,16 +1139,24 @@
   /* ---------------- Boot ---------------- */
   async function boot() {
     await DB.init();
-    populateTenants();
-    renderPOS(); renderCart();
-    // Restore a held sale if present.
-    const held = sessionStorage.getItem('held_' + Config.activeTenantId());
-    if (held) { try { cart = JSON.parse(held); sessionStorage.removeItem('held_' + Config.activeTenantId()); renderCart(); } catch (e) {} }
     wire();
     updateNetPill();
     updateSyncPill();
     Sync.start();
     registerSW();
+
+    // Gate the app behind a per-tenant staff login.
+    if (restoreSession()) {
+      applyRoleGating();
+      updateTopbar();
+      renderPOS(); renderCart();
+      // Restore a held sale if present.
+      const held = sessionStorage.getItem('held_' + Config.activeTenantId());
+      if (held) { try { cart = JSON.parse(held); sessionStorage.removeItem('held_' + Config.activeTenantId()); renderCart(); } catch (e) {} }
+    } else {
+      Config.setSession(null);
+      showLogin();
+    }
   }
 
   window.addEventListener('DOMContentLoaded', () => {

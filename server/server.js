@@ -33,7 +33,7 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'change-me-admin-token';
 
 /* ------------------------------- storage -------------------------------- */
 function emptyDB() {
-  return { seq: 0, tenants: {}, products: {}, variations: {}, sales: {}, sale_items: {}, alerts: [] };
+  return { seq: 0, tenants: {}, products: {}, variations: {}, staff: {}, sales: {}, sale_items: {}, alerts: [] };
 }
 let db = emptyDB();
 try {
@@ -67,6 +67,10 @@ function upsertVariation(v) {
   db.variations[v.id] = touch(Object.assign(cur, v, { updated_at: v.updated_at || nowISO() }));
   checkLowStock(db.variations[v.id]);
 }
+function upsertStaff(s) {
+  const cur = db.staff[s.id] || {};
+  db.staff[s.id] = touch(Object.assign(cur, s, { updated_at: s.updated_at || nowISO() }));
+}
 function checkLowStock(v) {
   if (!v || !v.track_stock) return;
   if (Number(v.stock) <= Number(v.low_stock_threshold || 0)) {
@@ -95,6 +99,7 @@ function applyChange(ch) {
       (p.variations || []).forEach(upsertVariation);
       if (ch.op === 'delete' && db.products[ch.entity_id]) db.products[ch.entity_id].active = 0;
       break;
+    case 'staff': upsertStaff(Object.assign({ id: ch.entity_id }, p)); break;
     case 'stock': {
       const v = db.variations[ch.entity_id];
       if (v) {
@@ -155,9 +160,9 @@ const server = http.createServer(async (req, res) => {
   if (p === '/api/pull' && req.method === 'GET') {
     const since = Number(url.searchParams.get('since') || 0);
     const pick = (map) => Object.values(map).filter((x) => (x.seq || 0) > since);
-    const tenants = pick(db.tenants), products = pick(db.products), variations = pick(db.variations);
+    const tenants = pick(db.tenants), products = pick(db.products), variations = pick(db.variations), staff = pick(db.staff);
     const cursor = db.seq;
-    return send(res, 200, { cursor, tenants, products, variations });
+    return send(res, 200, { cursor, tenants, products, variations, staff });
   }
 
   // ---- Low-stock alerts (reordering) ----

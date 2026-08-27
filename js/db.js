@@ -160,6 +160,20 @@ window.DB = (function () {
     line_total REAL
   );
 
+  /* Per-tenant staff accounts used for the till login. */
+  CREATE TABLE IF NOT EXISTS staff (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    username TEXT NOT NULL,
+    pin_hash TEXT,
+    salt TEXT,
+    role TEXT DEFAULT 'cashier',
+    active INTEGER DEFAULT 1,
+    updated_at TEXT,
+    created_at TEXT
+  );
+
   /* Durable outbox: every change that must reach the cloud lands here. */
   CREATE TABLE IF NOT EXISTS sync_queue (
     id TEXT PRIMARY KEY,
@@ -178,6 +192,7 @@ window.DB = (function () {
   CREATE INDEX IF NOT EXISTS idx_var_tenant ON variations(tenant_id);
   CREATE INDEX IF NOT EXISTS idx_sales_tenant ON sales(tenant_id);
   CREATE INDEX IF NOT EXISTS idx_items_sale ON sale_items(sale_id);
+  CREATE INDEX IF NOT EXISTS idx_staff_tenant ON staff(tenant_id);
   `;
 
   /* ---------- Query helpers ---------- */
@@ -255,6 +270,29 @@ window.DB = (function () {
     persistNow();
   }
 
+  /* Ensure every tenant has at least a manager + cashier so someone can log
+     in. Default credentials are shown on the login screen for the demo. */
+  async function ensureStaff() {
+    const tenants = all('SELECT id FROM tenants');
+    for (const t of tenants) {
+      const has = get('SELECT COUNT(*) AS n FROM staff WHERE tenant_id = ? AND active = 1', [t.id]);
+      if (has && has.n > 0) continue;
+      const defaults = [
+        { name: 'Manager', username: 'manager', pin: '1234', role: 'manager' },
+        { name: 'Cashier', username: 'cashier', pin: '4321', role: 'cashier' }
+      ];
+      for (const d of defaults) {
+        const salt = Config.randomSalt();
+        const hash = await Config.hashPin(d.pin, salt);
+        const ts = nowISO();
+        run(`INSERT INTO staff(id,tenant_id,name,username,pin_hash,salt,role,active,updated_at,created_at)
+             VALUES(?,?,?,?,?,?,?,1,?,?)`,
+          [uid('stf'), t.id, d.name, d.username, hash, salt, d.role, ts, ts]);
+      }
+    }
+    persistNow();
+  }
+
   /* ---------- Init ---------- */
   async function init() {
     if (ready) return ready;
@@ -270,6 +308,7 @@ window.DB = (function () {
         const t = get('SELECT id FROM tenants ORDER BY created_at LIMIT 1');
         if (t) setSetting('active_tenant_id', t.id);
       }
+      await ensureStaff();
       return true;
     })();
     return ready;
