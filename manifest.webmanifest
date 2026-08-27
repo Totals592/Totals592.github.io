@@ -1,0 +1,27 @@
+{
+  "name": "Totals POS",
+  "short_name": "Totals POS",
+  "description": "Offline-first, multi-tenant cash point-of-sale with inventory, SKUs, suppliers, legal VAT receipts and background cloud sync.",
+  "id": "/",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b1220",
+  "theme_color": "#0f766e",
+  "categories": ["business", "finance", "productivity"],
+  "icons": [
+    {
+      "src": "./icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "./icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

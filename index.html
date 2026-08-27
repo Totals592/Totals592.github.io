@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+  <meta name="theme-color" content="#0f766e">
+  <meta name="description" content="Offline-first multi-tenant cash POS with inventory, VAT receipts and cloud sync.">
+  <title>Totals POS</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./icons/icon.svg">
+  <link rel="stylesheet" href="./css/app.css">
+</head>
+<body>
+  <div class="update-banner" id="updateBanner">
+    <span>A new version of Totals POS is available.</span>
+    <button id="updateBtn">Update now</button>
+  </div>
+
+  <div class="app">
+    <!-- Top bar -->
+    <header class="topbar">
+      <div class="brand"><img src="./icons/icon.svg" alt=""> Totals POS</div>
+      <div class="tenant-pick">
+        <span class="pill" id="netPill"><span class="dot" id="netDot"></span><span id="netText">…</span></span>
+        <span class="pill" id="syncPill" title="Pending items waiting to reach the cloud"><span class="dot" id="syncDot"></span><span id="syncText">Local</span></span>
+        <select id="tenantSelect" title="Active shop / tenant"></select>
+      </div>
+    </header>
+
+    <!-- Tabs + views -->
+    <div>
+      <nav class="tabs" id="tabs">
+        <button class="tab active" data-view="pos">🧾 Sell</button>
+        <button class="tab" data-view="inventory">📦 Inventory</button>
+        <button class="tab" data-view="suppliers">🚚 Suppliers</button>
+        <button class="tab" data-view="reports">📊 Reports</button>
+        <button class="tab" data-view="admin">🏢 Admin</button>
+        <button class="tab" data-view="settings">⚙️ Settings</button>
+      </nav>
+
+      <main class="main">
+        <!-- ===================== POS ===================== -->
+        <section class="view active" id="view-pos">
+          <div class="pos-grid">
+            <div>
+              <div class="cats" id="cats"></div>
+              <div class="tiles" id="tiles"></div>
+            </div>
+            <aside class="cart">
+              <h3><span>Current sale</span><span id="cartCount" class="muted">0 items</span></h3>
+              <div class="cart-items" id="cartItems"><div class="empty">Tap a product to start a sale.</div></div>
+              <div class="summary">
+                <div class="row"><span>Subtotal (net)</span><span id="sumNet">—</span></div>
+                <div class="row"><span id="vatLabel">VAT</span><span id="sumVat">—</span></div>
+                <div class="row total"><span>Total</span><span id="sumTotal">—</span></div>
+                <button class="charge" id="chargeBtn" disabled>Charge</button>
+              </div>
+              <div class="cart-actions">
+                <button class="btn ghost small" id="holdBtn">Hold</button>
+                <button class="btn danger small" id="clearBtn">Clear</button>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <!-- ===================== INVENTORY ===================== -->
+        <section class="view" id="view-inventory">
+          <div class="kpis" id="invKpis"></div>
+          <div class="toolbar">
+            <input class="grow" id="invSearch" placeholder="Search products, SKU or category…">
+            <button class="btn brand" id="addProductBtn">+ Product</button>
+            <button class="btn" id="exportInvBtn">Export CSV</button>
+          </div>
+          <div class="card">
+            <div class="table-wrap">
+              <table class="data" id="invTable">
+                <thead><tr>
+                  <th></th><th>Product</th><th>Variation</th><th>SKU</th><th>Price</th>
+                  <th>Cost</th><th>Stock</th><th>Supplier</th><th>Status</th><th></th>
+                </tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- ===================== SUPPLIERS ===================== -->
+        <section class="view" id="view-suppliers">
+          <div class="toolbar">
+            <input class="grow" id="supSearch" placeholder="Search suppliers…">
+            <button class="btn brand" id="addSupplierBtn">+ Supplier</button>
+          </div>
+          <div class="card">
+            <div class="table-wrap">
+              <table class="data" id="supTable">
+                <thead><tr><th>Supplier</th><th>Contact</th><th>Phone</th><th>Email</th><th>Items</th><th></th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- ===================== REPORTS ===================== -->
+        <section class="view" id="view-reports">
+          <div class="kpis" id="repKpis"></div>
+          <div class="card">
+            <div class="section-title"><h3>Recent sales</h3><button class="btn small" id="exportSalesBtn">Export CSV</button></div>
+            <div class="table-wrap">
+              <table class="data" id="salesTable">
+                <thead><tr><th>Receipt</th><th>Time</th><th>Items</th><th>Total</th><th>Cash</th><th>Sync</th><th></th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="card">
+            <h3>Low stock — reorder list</h3>
+            <div class="table-wrap">
+              <table class="data" id="lowTable">
+                <thead><tr><th>Product</th><th>SKU</th><th>Stock</th><th>Threshold</th><th>Supplier</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- ===================== ADMIN ===================== -->
+        <section class="view" id="view-admin">
+          <div class="card" id="adminLock">
+            <h3>Administrator sign-in</h3>
+            <p class="muted">Enter the admin PIN to manage tenants and device access.</p>
+            <div style="max-width:220px"><input id="adminPinInput" inputmode="numeric" placeholder="PIN" type="password"></div>
+            <button class="btn brand" id="adminUnlockBtn" style="margin-top:10px">Unlock</button>
+          </div>
+          <div id="adminPanel" style="display:none">
+            <div class="toolbar">
+              <input class="grow" id="tenantSearch" placeholder="Search tenants…">
+              <button class="btn brand" id="addTenantBtn">+ New tenant</button>
+              <button class="btn" id="adminLockBtn">Lock</button>
+            </div>
+            <div class="card">
+              <div class="section-title"><h3>Tenant accounts</h3><span class="muted">Create, rename, suspend or configure each shop</span></div>
+              <div class="table-wrap">
+                <table class="data" id="tenantTable">
+                  <thead><tr><th>Shop</th><th>TIN</th><th>Contact</th><th>Products</th><th>Status</th><th></th></tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="card">
+              <h3>Remote management</h3>
+              <p class="muted">Changes made here queue for the cloud and reach every register automatically once online. Administrators can also manage tenants centrally from the server’s admin API — see the Settings tab for the API base URL.</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- ===================== SETTINGS ===================== -->
+        <section class="view" id="view-settings">
+          <div class="card">
+            <h3>This device</h3>
+            <div class="grid2">
+              <div><label>Register / device name</label><input id="setDevice"></div>
+              <div><label>Cashier name</label><input id="setCashier"></div>
+            </div>
+            <label>Admin PIN</label><input id="setAdminPin" inputmode="numeric">
+            <button class="btn brand" id="saveDeviceBtn" style="margin-top:12px">Save</button>
+          </div>
+          <div class="card">
+            <h3>Cloud sync</h3>
+            <p class="muted">Leave the API base URL empty to run as a standalone offline register. Point it at your deployed backend (see <code>server/</code>) to sync sales, stock and receive remote updates.</p>
+            <label>Cloud API base URL</label>
+            <input id="setApiBase" placeholder="https://your-backend.example.com">
+            <div class="toolbar" style="margin-top:12px">
+              <button class="btn brand" id="saveApiBtn">Save</button>
+              <button class="btn" id="syncNowBtn">Sync now</button>
+              <span class="pill"><span class="dot" id="syncDot2"></span><span id="lastSync">—</span></span>
+            </div>
+          </div>
+          <div class="card">
+            <h3>Backup & data</h3>
+            <div class="toolbar">
+              <button class="btn" id="backupBtn">Download backup (.sqlite)</button>
+              <button class="btn" id="restoreBtn">Restore backup</button>
+              <input type="file" id="restoreFile" accept=".sqlite,.db" hidden>
+              <button class="btn danger" id="wipeBtn">Erase all local data</button>
+            </div>
+            <p class="hint">The backup is the full SQLite database used by this register.</p>
+          </div>
+          <div class="card">
+            <h3>About</h3>
+            <p class="muted">Totals POS <span id="appVersion">—</span> · Offline-first PWA · SQLite (WebAssembly) · Multi-tenant.</p>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footbar">
+      <span class="soon"><span class="tag">SOON</span> Delivery Tracking Coming Soon</span>
+    </footer>
+  </div>
+
+  <!-- Modal host -->
+  <div class="modal-back" id="modalBack"><div class="modal" id="modal"></div></div>
+  <div class="toast-wrap" id="toasts"></div>
+
+  <!-- sql.js must load before db.js -->
+  <script src="./vendor/sql-wasm.js"></script>
+  <script src="./js/config.js"></script>
+  <script src="./js/db.js"></script>
+  <script src="./js/sync.js"></script>
+  <script src="./js/receipt.js"></script>
+  <script src="./js/app.js"></script>
+</body>
+</html>
