@@ -37,7 +37,10 @@
   <div class="app">
     <!-- Top bar -->
     <header class="topbar">
-      <div class="brand"><img src="./icons/icon.svg" alt=""> Totals POS</div>
+      <button class="brand" id="brandBtn" title="Tap to change logo (manager)">
+        <img src="./icons/icon.svg" alt="" id="brandLogo"> <span id="brandName">Totals POS</span>
+      </button>
+      <input type="file" id="logoFile" accept="image/*" hidden>
       <div class="tenant-pick">
         <span class="pill" id="netPill"><span class="dot" id="netDot"></span><span id="netText">…</span></span>
         <span class="pill" id="syncPill" title="Pending items waiting to reach the cloud"><span class="dot" id="syncDot"></span><span id="syncText">Local</span></span>
@@ -71,7 +74,8 @@
               <div class="cart-items" id="cartItems"><div class="empty">Tap a product to start a sale.</div></div>
               <div class="summary">
                 <div class="row"><span>Subtotal (net)</span><span id="sumNet">—</span></div>
-                <div class="row"><span id="vatLabel">VAT</span><span id="sumVat">—</span></div>
+                <div class="row" id="vatRow"><span id="vatLabel">VAT</span><span id="sumVat">—</span></div>
+                <div class="row" id="svcRow"><span id="svcLabel">Service charge</span><span id="sumSvc">—</span></div>
                 <div class="row total"><span>Total</span><span id="sumTotal">—</span></div>
                 <button class="charge" id="chargeBtn" disabled>Charge</button>
               </div>
@@ -122,6 +126,10 @@
 
         <!-- ===================== REPORTS ===================== -->
         <section class="view" id="view-reports">
+          <div class="toolbar">
+            <label class="switch"><input type="checkbox" id="repShowFigures"> Show sales &amp; income figures</label>
+            <span class="muted" id="repPrivacyHint">Figures are hidden by default for privacy.</span>
+          </div>
           <div class="kpis" id="repKpis"></div>
           <div class="card">
             <div class="section-title"><h3>Recent sales</h3><button class="btn small" id="exportSalesBtn">Export CSV</button></div>
@@ -193,6 +201,37 @@
               <button class="btn brand" id="saveApiBtn">Save</button>
               <button class="btn" id="syncNowBtn">Sync now</button>
               <span class="pill"><span class="dot" id="syncDot2"></span><span id="lastSync">—</span></span>
+            </div>
+          </div>
+          <div class="card" id="taxCard">
+            <h3>Sales, VAT &amp; service charge</h3>
+            <p class="muted">Applies to this shop. These can be shown or hidden on the printed receipt.</p>
+            <div class="grid2">
+              <div>
+                <label class="switch"><input type="checkbox" id="setVatEnabled"> Charge VAT</label>
+                <label>VAT rate (%)</label><input id="setVatRate" type="number" step="0.1" min="0">
+                <label>VAT pricing</label>
+                <select id="setVatInclusive">
+                  <option value="1">Inclusive (price contains VAT)</option>
+                  <option value="0">Exclusive (VAT added on top)</option>
+                </select>
+                <label class="switch"><input type="checkbox" id="setVatShow"> Show VAT on receipt</label>
+              </div>
+              <div>
+                <label class="switch"><input type="checkbox" id="setSvcEnabled"> Add service charge</label>
+                <label>Service charge (%)</label><input id="setSvcRate" type="number" step="0.1" min="0">
+                <label class="switch"><input type="checkbox" id="setSvcShow"> Show service charge on receipt</label>
+              </div>
+            </div>
+            <button class="btn brand" id="saveTaxBtn" style="margin-top:12px">Save</button>
+          </div>
+          <div class="card" id="brandingCard">
+            <h3>Shop logo</h3>
+            <p class="muted">Shown in the top-left corner and printed on receipts. Tap the logo in the top-left corner at any time to change it.</p>
+            <div class="toolbar">
+              <img class="thumb" id="logoPrev" alt="" style="width:64px;height:64px">
+              <button class="btn" id="logoUploadBtn">Upload logo</button>
+              <button class="btn danger" id="logoClearBtn">Remove</button>
             </div>
           </div>
           <div class="card" id="staffCard">

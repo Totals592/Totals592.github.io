@@ -76,6 +76,11 @@ window.DB = (function () {
     currency TEXT DEFAULT 'GHS',
     vat_rate REAL DEFAULT 15,
     vat_inclusive INTEGER DEFAULT 1,
+    vat_enabled INTEGER DEFAULT 1,
+    vat_show_receipt INTEGER DEFAULT 1,
+    service_charge_enabled INTEGER DEFAULT 0,
+    service_charge_rate REAL DEFAULT 0,
+    service_charge_show_receipt INTEGER DEFAULT 1,
     receipt_footer TEXT,
     logo TEXT,
     status TEXT DEFAULT 'active',
@@ -141,6 +146,8 @@ window.DB = (function () {
     cashier TEXT,
     vat_inclusive INTEGER,
     vat_rate REAL,
+    service_charge REAL DEFAULT 0,
+    service_charge_rate REAL DEFAULT 0,
     currency TEXT,
     status TEXT DEFAULT 'completed',
     synced INTEGER DEFAULT 0,
@@ -293,6 +300,21 @@ window.DB = (function () {
     persistNow();
   }
 
+  /* Add columns introduced after the first release, for existing databases. */
+  function ensureColumn(table, col, decl) {
+    const cols = all(`PRAGMA table_info(${table})`);
+    if (!cols.find((c) => c.name === col)) run(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`);
+  }
+  function migrate() {
+    ensureColumn('tenants', 'vat_enabled', 'INTEGER DEFAULT 1');
+    ensureColumn('tenants', 'vat_show_receipt', 'INTEGER DEFAULT 1');
+    ensureColumn('tenants', 'service_charge_enabled', 'INTEGER DEFAULT 0');
+    ensureColumn('tenants', 'service_charge_rate', 'REAL DEFAULT 0');
+    ensureColumn('tenants', 'service_charge_show_receipt', 'INTEGER DEFAULT 1');
+    ensureColumn('sales', 'service_charge', 'REAL DEFAULT 0');
+    ensureColumn('sales', 'service_charge_rate', 'REAL DEFAULT 0');
+  }
+
   /* ---------- Init ---------- */
   async function init() {
     if (ready) return ready;
@@ -302,6 +324,7 @@ window.DB = (function () {
       db = saved ? new SQL.Database(new Uint8Array(saved)) : new SQL.Database();
       db.run('PRAGMA foreign_keys = ON;');
       db.run(SCHEMA);
+      migrate();
       seedIfEmpty();
       // Make sure an active tenant is always set.
       if (!getSetting('active_tenant_id')) {

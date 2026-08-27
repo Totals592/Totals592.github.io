@@ -59,16 +59,27 @@
   }
   function cartTotals() {
     const t = Config.activeTenant();
-    const gross = cart.reduce((s, c) => s + c.unit_price * c.qty, 0);
-    let net, vat, total;
-    if (t.vat_inclusive) {
-      const b = Config.vatBreakdown(gross, t.vat_rate, true);
-      net = b.net; vat = b.vat; total = gross;
+    const itemsGross = cart.reduce((s, c) => s + c.unit_price * c.qty, 0);
+    const vatOn = !!t.vat_enabled && Number(t.vat_rate) > 0;
+    const svcOn = !!t.service_charge_enabled && Number(t.service_charge_rate) > 0;
+
+    // VAT is applied to the item lines; the service charge is a separate add-on.
+    let itemsNet, vat, itemsTotal;
+    if (vatOn && t.vat_inclusive) {
+      const b = Config.vatBreakdown(itemsGross, t.vat_rate, true);
+      itemsNet = b.net; vat = b.vat; itemsTotal = itemsGross;
+    } else if (vatOn) {
+      const b = Config.vatBreakdown(itemsGross, t.vat_rate, false);
+      itemsNet = b.net; vat = b.vat; itemsTotal = b.gross;
     } else {
-      const b = Config.vatBreakdown(gross, t.vat_rate, false);
-      net = b.net; vat = b.vat; total = b.gross;
+      itemsNet = itemsGross; vat = 0; itemsTotal = itemsGross;
     }
-    return { net, vat, total, count: cart.reduce((s, c) => s + c.qty, 0) };
+    const service = svcOn ? itemsGross * (Number(t.service_charge_rate) / 100) : 0;
+    const total = itemsTotal + service;
+    return {
+      itemsGross, itemsNet, itemsTotal, vat, service, total,
+      vatOn, svcOn, count: cart.reduce((s, c) => s + c.qty, 0)
+    };
   }
   function renderCart() {
     const box = $('#cartItems');
@@ -92,11 +103,16 @@
     }
     const tot = cartTotals();
     $('#cartCount').textContent = tot.count + ' item' + (tot.count === 1 ? '' : 's');
-    $('#sumNet').textContent = money(tot.net);
+    $('#sumNet').textContent = money(tot.itemsNet);
+    // VAT row (hidden entirely when VAT is switched off for this shop).
+    $('#vatRow').style.display = tot.vatOn ? '' : 'none';
     $('#sumVat').textContent = money(tot.vat);
+    $('#vatLabel').textContent = `VAT (${t.vat_rate}%${t.vat_inclusive ? ' incl.' : ''})`;
+    // Service-charge row (hidden when off).
+    $('#svcRow').style.display = tot.svcOn ? '' : 'none';
+    $('#sumSvc').textContent = money(tot.service);
+    $('#svcLabel').textContent = `Service charge (${t.service_charge_rate}%)`;
     $('#sumTotal').textContent = money(tot.total);
-    $('#vatLabel').textContent = t.vat_rate > 0
-      ? `VAT (${t.vat_rate}%${t.vat_inclusive ? ' incl.' : ''})` : 'VAT';
     $('#chargeBtn').disabled = cart.length === 0;
     $('#chargeBtn').textContent = cart.length ? 'Charge ' + money(tot.total) : 'Charge';
   }
@@ -222,10 +238,11 @@
     const change = cash - tot.total;
 
     DB.run(`INSERT INTO sales(id,tenant_id,receipt_no,subtotal,vat_amount,total,cash_received,change_due,
-             item_count,cashier,vat_inclusive,vat_rate,currency,status,synced,created_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [saleId, t.id, receiptNo, tot.net, tot.vat, tot.total, cash, change, tot.count,
-       Config.cashierName(), t.vat_inclusive ? 1 : 0, t.vat_rate, t.currency, 'completed', 0, now]);
+             item_count,cashier,vat_inclusive,vat_rate,service_charge,service_charge_rate,currency,status,synced,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [saleId, t.id, receiptNo, tot.itemsNet, tot.vat, tot.total, cash, change, tot.count,
+       Config.cashierName(), t.vat_inclusive ? 1 : 0, tot.vatOn ? t.vat_rate : 0,
+       tot.service, tot.svcOn ? t.service_charge_rate : 0, t.currency, 'completed', 0, now]);
 
     const items = cart.map((c) => {
       const id = DB.uid('si');
@@ -241,9 +258,11 @@
     });
 
     const saleRow = {
-      receipt_no: receiptNo, subtotal: tot.net, vat_amount: tot.vat, total: tot.total,
+      receipt_no: receiptNo, subtotal: tot.itemsNet, vat_amount: tot.vat, total: tot.total,
       cash_received: cash, change_due: change, cashier: Config.cashierName(),
-      vat_inclusive: t.vat_inclusive, vat_rate: t.vat_rate, created_at: now
+      vat_inclusive: t.vat_inclusive, vat_rate: tot.vatOn ? t.vat_rate : 0,
+      service_charge: tot.service, service_charge_rate: tot.svcOn ? t.service_charge_rate : 0,
+      created_at: now
     };
     // Queue the whole sale for the cloud (real-time figures across channels).
     Sync.queue('sale', saleId, 'create', { sale: Object.assign({ id: saleId, tenant_id: t.id }, saleRow), items }, t.id);
@@ -567,6 +586,7 @@
   }
 
   /* ---------------- Reports ---------------- */
+  let repShowFigures = false; // sales/income hidden by default each visit
   function renderReports() {
     const tid = Config.activeTenantId();
     const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -574,16 +594,22 @@
     const todaySales = sales.filter((s) => new Date(s.created_at) >= today);
     const todayTotal = todaySales.reduce((s, r) => s + r.total, 0);
     const pending = DB.get('SELECT COUNT(*) AS n FROM sales WHERE tenant_id=? AND synced=0', [tid]);
+
+    // Money figures are masked until the manager explicitly reveals them.
+    $('#repShowFigures').checked = repShowFigures;
+    $('#repPrivacyHint').textContent = repShowFigures ? 'Figures are visible.' : 'Figures are hidden by default for privacy.';
+    const cash = (v) => repShowFigures ? money(v) : '••••••';
+
     $('#repKpis').innerHTML =
-      kpi(money(todayTotal), "Today's sales") +
+      kpi(cash(todayTotal), "Today's sales") +
       kpi(todaySales.length, 'Transactions today') +
-      kpi(money(todaySales.reduce((s, r) => s + r.vat_amount, 0)), 'VAT collected today') +
+      kpi(cash(todaySales.reduce((s, r) => s + r.vat_amount, 0)), 'VAT collected today') +
       kpi(pending ? pending.n : 0, 'Unsynced sales');
 
     $('#salesTable tbody').innerHTML = sales.map((s) => `<tr>
       <td>${esc(s.receipt_no)}</td>
       <td>${new Date(s.created_at).toLocaleString()}</td>
-      <td>${s.item_count}</td><td>${money(s.total)}</td><td>${money(s.cash_received)}</td>
+      <td>${s.item_count}</td><td>${cash(s.total)}</td><td>${cash(s.cash_received)}</td>
       <td>${s.synced ? '<span class="badge ok">Synced</span>' : '<span class="badge">Pending</span>'}</td>
       <td><button class="btn small" data-reprint="${s.id}">Receipt</button></td>
     </tr>`).join('') || '<tr><td colspan="7" class="muted center">No sales yet.</td></tr>';
@@ -725,6 +751,31 @@
     const t = Config.activeTenant();
     $('#tenantName').textContent = t ? t.name : '—';
     $('#userName').textContent = s ? (s.name + ' · ' + (s.role || 'cashier')) : '—';
+    updateBrand();
+  }
+  function updateBrand() {
+    const t = Config.activeTenant();
+    $('#brandLogo').src = (t && t.logo) ? t.logo : './icons/icon.svg';
+    $('#brandName').textContent = t ? t.name : 'Totals POS';
+  }
+
+  function canManage() {
+    const r = Config.currentRole();
+    return r === 'manager' || r === 'admin';
+  }
+
+  // Save a downscaled logo for the active shop (managers only).
+  async function saveLogo(file) {
+    if (!canManage()) { toast('Managers only', 'err'); return; }
+    const t = Config.activeTenant();
+    const dataUrl = file ? await fileToImage(file, 256) : '';
+    const now = DB.nowISO();
+    DB.run('UPDATE tenants SET logo=?, updated_at=? WHERE id=?', [dataUrl, now, t.id]);
+    Sync.queue('tenant', t.id, 'update', { id: t.id, logo: dataUrl, updated_at: now }, t.id);
+    DB.persistNow();
+    updateBrand();
+    if ($('#logoPrev')) $('#logoPrev').src = dataUrl || './icons/icon.svg';
+    toast(dataUrl ? 'Logo updated' : 'Logo removed', 'ok');
   }
 
   // Hide manager-only tabs for cashiers; keep the current view valid.
@@ -768,6 +819,10 @@
   }
 
   function signInAs(session) {
+    // A new sign-in never inherits a previous admin unlock; the Admin tab must
+    // be unlocked again with the device PIN (unless this is an admin override).
+    if (session.admin) sessionStorage.setItem('admin_ok', '1');
+    else sessionStorage.removeItem('admin_ok');
     Config.setSession(session);
     Config.setActiveTenant(session.tenant_id);
     DB.persistNow();
@@ -781,6 +836,8 @@
   }
 
   function signOut() {
+    // Signing out of any profile revokes admin access until re-authenticated.
+    sessionStorage.removeItem('admin_ok');
     Config.setSession(null);
     cart = [];
     updateTopbar();
@@ -960,7 +1017,7 @@
     $$('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + name));
     if (name === 'inventory') renderInventory();
     if (name === 'suppliers') renderSuppliers();
-    if (name === 'reports') renderReports();
+    if (name === 'reports') { repShowFigures = false; renderReports(); }
     if (name === 'admin') renderAdmin();
     if (name === 'settings') loadSettings();
   }
@@ -970,6 +1027,16 @@
     $('#setCashier').value = DB.getSetting('cashier_name') || '';
     $('#setAdminPin').value = Config.adminPin();
     $('#setApiBase').value = DB.getSetting('api_base') || '';
+    // Sales / VAT / service charge for the active shop.
+    const t = Config.activeTenant() || {};
+    $('#setVatEnabled').checked = !!t.vat_enabled;
+    $('#setVatRate').value = t.vat_rate != null ? t.vat_rate : 15;
+    $('#setVatInclusive').value = t.vat_inclusive ? '1' : '0';
+    $('#setVatShow').checked = t.vat_show_receipt !== 0;
+    $('#setSvcEnabled').checked = !!t.service_charge_enabled;
+    $('#setSvcRate').value = t.service_charge_rate != null ? t.service_charge_rate : 0;
+    $('#setSvcShow').checked = t.service_charge_show_receipt !== 0;
+    $('#logoPrev').src = t.logo || './icons/icon.svg';
     renderStaff();
     updateSyncPill();
   }
@@ -1021,8 +1088,10 @@
     $('#supTable').addEventListener('click', (e) => { const b = e.target.closest('[data-editsup]'); if (b) supplierModal(b.dataset.editsup); });
 
     // Reports
+    $('#repShowFigures').addEventListener('change', (e) => { repShowFigures = e.target.checked; renderReports(); });
     $('#salesTable').addEventListener('click', (e) => { const b = e.target.closest('[data-reprint]'); if (b) reprint(b.dataset.reprint); });
     $('#exportSalesBtn').addEventListener('click', () => {
+      if (!repShowFigures) { toast('Tick “Show sales & income figures” first', 'err'); return; }
       const tid = Config.activeTenantId();
       const rows = DB.all('SELECT receipt_no,created_at,item_count,subtotal,vat_amount,total,cash_received,change_due,synced FROM sales WHERE tenant_id=? ORDER BY created_at DESC', [tid]);
       downloadCSV('sales.csv', [['Receipt', 'Time', 'Items', 'Net', 'VAT', 'Total', 'Cash', 'Change', 'Synced'],
@@ -1064,6 +1133,34 @@
       if (ed) staffModal(Config.activeTenantId(), ed.dataset.editstaff, () => renderStaff());
       if (del) toggleStaff(del.dataset.delstaff, () => renderStaff());
     });
+
+    // Settings — sales / VAT / service charge
+    $('#saveTaxBtn').addEventListener('click', () => {
+      const t = Config.activeTenant(); const now = DB.nowISO();
+      const vals = {
+        vat_enabled: $('#setVatEnabled').checked ? 1 : 0,
+        vat_rate: parseFloat($('#setVatRate').value) || 0,
+        vat_inclusive: parseInt($('#setVatInclusive').value, 10),
+        vat_show_receipt: $('#setVatShow').checked ? 1 : 0,
+        service_charge_enabled: $('#setSvcEnabled').checked ? 1 : 0,
+        service_charge_rate: parseFloat($('#setSvcRate').value) || 0,
+        service_charge_show_receipt: $('#setSvcShow').checked ? 1 : 0
+      };
+      DB.run(`UPDATE tenants SET vat_enabled=?,vat_rate=?,vat_inclusive=?,vat_show_receipt=?,
+               service_charge_enabled=?,service_charge_rate=?,service_charge_show_receipt=?,updated_at=? WHERE id=?`,
+        [vals.vat_enabled, vals.vat_rate, vals.vat_inclusive, vals.vat_show_receipt,
+         vals.service_charge_enabled, vals.service_charge_rate, vals.service_charge_show_receipt, now, t.id]);
+      Sync.queue('tenant', t.id, 'update', Object.assign({ id: t.id, updated_at: now }, vals), t.id);
+      DB.persistNow();
+      renderCart(); renderPOS();
+      toast('Tax settings saved', 'ok');
+    });
+
+    // Settings — logo / branding
+    $('#brandBtn').addEventListener('click', () => { if (canManage()) $('#logoFile').click(); });
+    $('#logoUploadBtn').addEventListener('click', () => $('#logoFile').click());
+    $('#logoClearBtn').addEventListener('click', () => saveLogo(null));
+    $('#logoFile').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) saveLogo(f); e.target.value = ''; });
 
     // Settings — device
     $('#saveDeviceBtn').addEventListener('click', () => {
