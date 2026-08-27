@@ -1,0 +1,13 @@
+{
+  "name": "totals-pos-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Zero-dependency reference cloud backend for the Totals POS PWA: sync API, cursor-based pull, low-stock alerts and a web admin control portal.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
