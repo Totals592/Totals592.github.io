@@ -25,12 +25,16 @@
     m.innerHTML = html;
     $('#modalBack').classList.add('open');
   }
-  function closeModal() { $('#modalBack').classList.remove('open'); $('#modal').innerHTML = ''; }
+  function closeModal() {
+    if (modalCleanup) { try { modalCleanup(); } catch (e) {} modalCleanup = null; }
+    $('#modalBack').classList.remove('open'); $('#modal').innerHTML = '';
+  }
   $('#modalBack').addEventListener('click', (e) => { if (e.target.id === 'modalBack') closeModal(); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
   /* ---------------- Cart state ---------------- */
   let cart = []; // {variation_id, product_id, name, sku, unit_price, qty, track_stock, stock}
+  let modalCleanup = null; // releases the camera when a scanner modal closes
 
   function cartAdd(v, p) {
     const line = cart.find((c) => c.variation_id === v.id);
@@ -180,6 +184,92 @@
       cartAdd(v, p); closeModal();
     }));
     $('[data-close]', $('#modal')).addEventListener('click', closeModal);
+  }
+
+  /* ---------------- Barcode scanning ---------------- */
+
+  // Add a scanned code to the cart. Returns the matched row, or null.
+  function addByBarcode(code) {
+    const row = Scan.lookup(code);
+    if (!row) { toast('No item for code ' + code, 'err'); return null; }
+    if (row.track_stock && row.stock <= 0) { toast(row.product_name + ' is out of stock', 'err'); return row; }
+    cartAdd(row, { id: row.pid, name: row.product_name });
+    const label = row.product_name + (row.name && row.name !== 'Default' ? ' · ' + row.name : '');
+    toast('Added ' + label + ' — ' + money(row.price), 'ok');
+    return row;
+  }
+
+  /*
+   * Reusable camera scanner modal.
+   * opts: { title, continuous, onCode }. When continuous is true the modal
+   * stays open after each read (cashier scans many items); otherwise it closes
+   * on the first successful read. Includes a manual-entry fallback field.
+   */
+  function openScanner(opts) {
+    opts = opts || {};
+    const supported = Scan.cameraSupported();
+    openModal(`
+      <header><h3>${esc(opts.title || 'Scan barcode')}</h3><button class="x" data-close>×</button></header>
+      <div class="body">
+        <div class="scanner">
+          <video id="scanVideo" playsinline muted></video>
+          <div class="scan-reticle"></div>
+        </div>
+        <div id="scanStatus" class="hint center">${supported ? 'Point the camera at a barcode…' : 'Camera unavailable — type the code below.'}</div>
+        <label>Or enter code manually</label>
+        <div class="toolbar">
+          <input class="grow" id="scanManual" inputmode="numeric" placeholder="Barcode / SKU" autocomplete="off">
+          <button class="btn brand" id="scanManualBtn">Enter</button>
+        </div>
+      </div>
+      <div class="foot"><button class="btn ghost" data-close>Done</button></div>`);
+    const m = $('#modal');
+    let stop = null;
+    let lastCode = ''; let lastAt = 0;
+
+    function handle(code) {
+      const now = Date.now();
+      if (code === lastCode && now - lastAt < 1500) return; // debounce repeats
+      lastCode = code; lastAt = now;
+      if (navigator.vibrate) { try { navigator.vibrate(60); } catch (e) {} }
+      if (opts.continuous) {
+        // Stay open so the cashier can scan several items in a row.
+        if (opts.onCode) opts.onCode(code);
+        const st = $('#scanStatus', m);
+        if (st) st.textContent = 'Last scan: ' + code;
+      } else {
+        // Release the camera and close THIS modal first, so onCode is free to
+        // open its own modal (e.g. the product editor) without being clobbered.
+        cleanup(); modalCleanup = null; closeModal();
+        if (opts.onCode) opts.onCode(code);
+      }
+    }
+    function cleanup() { if (stop) { try { stop(); } catch (e) {} stop = null; } }
+    function cleanupAndClose() { cleanup(); closeModal(); }
+
+    $$('[data-close]', m).forEach((b) => b.addEventListener('click', cleanupAndClose));
+    $('#scanManualBtn', m).addEventListener('click', () => {
+      const field = $('#scanManual', m);
+      const v = field ? field.value.trim() : '';
+      if (!v) return;
+      handle(v);
+      const again = $('#scanManual', m); // may be gone if the modal closed
+      if (again) { again.value = ''; again.focus(); }
+    });
+    $('#scanManual', m).addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#scanManualBtn', m).click(); });
+
+    if (supported) {
+      Scan.startCamera($('#scanVideo', m), handle)
+        .then((s) => { stop = s; })
+        .catch((err) => {
+          const st = $('#scanStatus', m);
+          if (st) st.textContent = (err && err.message) || 'Could not start the camera. Use manual entry.';
+        });
+    } else {
+      setTimeout(() => $('#scanManual', m) && $('#scanManual', m).focus(), 60);
+    }
+    // Ensure the camera is released if the modal is dismissed another way.
+    modalCleanup = cleanup;
   }
 
   /* ---------------- Charge (cash) ---------------- */
@@ -358,13 +448,13 @@
     });
   }
 
-  function productModal(pid) {
+  function productModal(pid, prefillBarcode) {
     const tid = Config.activeTenantId();
     const editing = !!pid;
     const p = editing ? DB.get('SELECT * FROM products WHERE id = ?', [pid])
                       : { id: '', name: '', category: 'General', color: '#334155', image: '', description: '', active: 1 };
     let vars = editing ? DB.all('SELECT * FROM variations WHERE product_id = ? ORDER BY price', [pid]) : [];
-    if (!vars.length) vars = [{ id: '', name: 'Default', sku: '', price: 0, cost: 0, stock: 0, track_stock: 1, low_stock_threshold: 5, supplier_id: '', active: 1 }];
+    if (!vars.length) vars = [{ id: '', name: 'Default', sku: '', barcode: prefillBarcode || '', price: 0, cost: 0, stock: 0, track_stock: 1, low_stock_threshold: 5, supplier_id: '', active: 1 }];
     const suppliers = DB.all('SELECT * FROM suppliers WHERE tenant_id = ? ORDER BY name', [tid]);
     let image = p.image || '';
 
@@ -373,6 +463,7 @@
         <div class="grid2">
           <div><label>Variation</label><input data-v="name" value="${esc(v.name || '')}"></div>
           <div><label>SKU</label><input data-v="sku" value="${esc(v.sku || '')}"></div>
+          <div><label>Barcode</label><input data-v="barcode" value="${esc(v.barcode || '')}" placeholder="scan or type"></div>
           <div><label>Price</label><input data-v="price" type="number" step="0.01" value="${v.price}"></div>
           <div><label>Cost</label><input data-v="cost" type="number" step="0.01" value="${v.cost}"></div>
           <div><label>Stock</label><input data-v="stock" type="number" step="1" value="${v.stock}"></div>
@@ -450,7 +541,7 @@
       return $$('[data-vrow]', m).map((row) => {
         const g = (k) => { const el = row.querySelector(`[data-v="${k}"]`); return el ? el.value : ''; };
         return {
-          id: g('id'), name: g('name') || 'Default', sku: g('sku'),
+          id: g('id'), name: g('name') || 'Default', sku: g('sku'), barcode: g('barcode').trim(),
           price: parseFloat(g('price')) || 0, cost: parseFloat(g('cost')) || 0,
           stock: parseFloat(g('stock')) || 0, track_stock: g('track_stock') === '1' ? 1 : 0,
           low_stock_threshold: parseFloat(g('low_stock_threshold')) || 0,
@@ -491,14 +582,14 @@
       const keptIds = [];
       collected.forEach((v) => {
         if (v.id) {
-          DB.run(`UPDATE variations SET name=?,sku=?,price=?,cost=?,stock=?,track_stock=?,low_stock_threshold=?,supplier_id=?,active=1,updated_at=? WHERE id=?`,
-            [v.name, v.sku, v.price, v.cost, v.stock, v.track_stock, v.low_stock_threshold, v.supplier_id, now, v.id]);
+          DB.run(`UPDATE variations SET name=?,sku=?,barcode=?,price=?,cost=?,stock=?,track_stock=?,low_stock_threshold=?,supplier_id=?,active=1,updated_at=? WHERE id=?`,
+            [v.name, v.sku, v.barcode, v.price, v.cost, v.stock, v.track_stock, v.low_stock_threshold, v.supplier_id, now, v.id]);
           keptIds.push(v.id);
         } else {
           const vid = DB.uid('var');
-          DB.run(`INSERT INTO variations(id,product_id,tenant_id,name,sku,price,cost,stock,track_stock,low_stock_threshold,supplier_id,active,updated_at,created_at)
-                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-            [vid, productId, tid, v.name, v.sku, v.price, v.cost, v.stock, v.track_stock, v.low_stock_threshold, v.supplier_id, 1, now, now]);
+          DB.run(`INSERT INTO variations(id,product_id,tenant_id,name,sku,barcode,price,cost,stock,track_stock,low_stock_threshold,supplier_id,active,updated_at,created_at)
+                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            [vid, productId, tid, v.name, v.sku, v.barcode, v.price, v.cost, v.stock, v.track_stock, v.low_stock_threshold, v.supplier_id, 1, now, now]);
           keptIds.push(vid);
         }
       });
@@ -1060,6 +1151,9 @@
       if (inc) cartSetQty(inc.dataset.inc, 1); if (dec) cartSetQty(dec.dataset.dec, -1);
     });
     $('#chargeBtn').addEventListener('click', openCharge);
+    $('#scanSellBtn').addEventListener('click', () => openScanner({
+      title: 'Scan items to sell', continuous: true, onCode: addByBarcode
+    }));
     $('#clearBtn').addEventListener('click', () => { if (cart.length && confirm('Clear the current sale?')) { cart = []; renderCart(); } });
     $('#holdBtn').addEventListener('click', () => {
       if (!cart.length) return;
@@ -1068,6 +1162,14 @@
     });
 
     // Inventory
+    $('#scanAddBtn').addEventListener('click', () => openScanner({
+      title: 'Scan item to add', continuous: false,
+      onCode: (code) => {
+        const row = Scan.lookup(code);
+        if (row) { toast('Already in inventory: ' + row.product_name); productModal(row.pid); }
+        else { toast('New item — code ' + code); productModal(null, code); }
+      }
+    }));
     $('#addProductBtn').addEventListener('click', () => productModal(null));
     $('#invSearch').addEventListener('input', (e) => { invFilter = e.target.value; renderInventory(); });
     $('#invTable').addEventListener('click', (e) => {
@@ -1193,6 +1295,23 @@
     window.addEventListener('online', updateNetPill);
     window.addEventListener('offline', updateNetPill);
     Sync.onChange((state) => { updateSyncPill(state); if (state.state === 'synced') { renderPOS(); if ($('#view-inventory').classList.contains('active')) renderInventory(); } });
+
+    // Hardware barcode scanners emulate a keyboard: they send characters very
+    // fast and finish with Enter. On the Sell screen (no field focused, no
+    // modal open) we buffer those keystrokes and treat the line as a scan.
+    let scanBuf = '', scanLast = 0;
+    document.addEventListener('keydown', (e) => {
+      const posActive = $('#view-pos').classList.contains('active');
+      const el = document.activeElement;
+      const inField = el && /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName);
+      const modalOpen = $('#modalBack').classList.contains('open') || $('#loginBack').classList.contains('open');
+      if (!posActive || inField || modalOpen) { scanBuf = ''; return; }
+      const now = Date.now();
+      if (now - scanLast > 120) scanBuf = ''; // reset between human keystrokes
+      scanLast = now;
+      if (e.key === 'Enter') { if (scanBuf.length >= 3) addByBarcode(scanBuf); scanBuf = ''; return; }
+      if (e.key && e.key.length === 1) scanBuf += e.key;
+    });
   }
 
   /* ---------------- Service worker + update flow ---------------- */

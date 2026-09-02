@@ -45,8 +45,21 @@ location**, an **itemised list with quantities and prices**, the **VAT
 breakdown (inclusive or exclusive)**, totals, cash tendered and change. Any past
 sale can be reprinted from **Reports**.
 
+### Barcode scanning
+- **Sell screen:** a **📷 Scan** button opens the device camera to scan items
+  straight into the cart (stays open for rapid multi-item scanning); each scan
+  pops the item's details and price. External **USB/Bluetooth scanners** work
+  too — just scan while on the Sell screen, no button needed.
+- **Inventory:** **📷 Scan to add** opens the camera; a known barcode jumps to
+  that product for editing, an unknown one starts a new product with the code
+  pre-filled. Every variation also has a **Barcode** field for manual/scanner
+  entry.
+- A scanned code matches on **barcode _or_ SKU**. Uses the browser's native
+  BarcodeDetector where available (Android/Chrome) and a bundled ZXing decoder
+  as a fallback (iOS Safari, etc.); a manual-entry box is always offered.
+
 ### Inventory management
-- Products with multiple **variations**, each carrying its own **SKU**, price,
+- Products with multiple **variations**, each carrying its own **SKU**, **barcode**, price,
   cost, stock level and **supplier**.
 - **Suppliers** directory with contact details.
 - **Real-time stock decrement** on every sale.
