@@ -12,7 +12,7 @@
  *   to reinstall anything and no store review is involved.
  */
 
-const APP_VERSION = 'v1.3.0';
+const APP_VERSION = 'v1.4.0';
 const CACHE = `totals-pos-${APP_VERSION}`;
 
 // The complete app shell. Everything here is available offline after first load.
@@ -30,6 +30,7 @@ const SHELL = [
   './vendor/sql-wasm.js',
   './vendor/sql-wasm.wasm',
   './vendor/zxing.min.js',
+  './vendor/xlsx.full.min.js',
   './icons/icon.svg'
 ];
 

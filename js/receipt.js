@@ -13,9 +13,10 @@ window.Receipt = (function () {
     const c = tenant.currency;
     const e = Config.escapeHtml;
     const dt = new Date(sale.created_at);
+    // SKU is intentionally NOT printed on the customer receipt.
     const rows = items.map((it) => `
       <tr>
-        <td class="l">${e(it.name)}${it.sku ? `<div class="sku">${e(it.sku)}</div>` : ''}</td>
+        <td class="l">${e(it.name)}</td>
         <td class="c">${it.qty}</td>
         <td class="r">${Config.money(it.unit_price, c)}</td>
         <td class="r">${Config.money(it.line_total, c)}</td>
@@ -41,6 +42,7 @@ window.Receipt = (function () {
         ${tenant.tin ? `<div class="line"><b>TIN: ${e(tenant.tin)}</b></div>` : ''}
       </div>
       <div class="rule"></div>
+      ${sale.order_no != null ? `<div class="order">ORDER #${e(sale.order_no)}</div>` : ''}
       <div class="meta">
         <div><span>Receipt</span><span>${e(sale.receipt_no)}</span></div>
         <div><span>Date</span><span>${dt.toLocaleString()}</span></div>
@@ -83,7 +85,7 @@ window.Receipt = (function () {
     table.items { width:100%; border-collapse:collapse; }
     table.items th, table.items td { padding:2px 0; font-size:11px; vertical-align:top; }
     .l{ text-align:left; } .c{ text-align:center; } .r{ text-align:right; }
-    .sku { font-size:9px; color:#444; }
+    .order { text-align:center; font-size:22px; font-weight:bold; letter-spacing:1px; margin:4px 0; }
     .totals .grand { font-size:14px; font-weight:bold; border-top:1px solid #000; border-bottom:1px solid #000; padding:3px 0; margin:3px 0; }
     .ftr { text-align:center; margin-top:6px; }
     .small { font-size:9px; color:#333; margin-top:3px; }

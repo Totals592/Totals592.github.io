@@ -324,13 +324,15 @@
     const t = Config.activeTenant();
     const saleId = DB.uid('sale');
     const receiptNo = Config.nextReceiptNo(t.id, t.slug);
+    const orderNo = Config.nextOrderNo(t.id);      // resets daily
+    const orderDate = Config.todayKey();
     const now = DB.nowISO();
     const change = cash - tot.total;
 
-    DB.run(`INSERT INTO sales(id,tenant_id,receipt_no,subtotal,vat_amount,total,cash_received,change_due,
+    DB.run(`INSERT INTO sales(id,tenant_id,receipt_no,order_no,order_date,subtotal,vat_amount,total,cash_received,change_due,
              item_count,cashier,vat_inclusive,vat_rate,service_charge,service_charge_rate,currency,status,synced,created_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [saleId, t.id, receiptNo, tot.itemsNet, tot.vat, tot.total, cash, change, tot.count,
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [saleId, t.id, receiptNo, orderNo, orderDate, tot.itemsNet, tot.vat, tot.total, cash, change, tot.count,
        Config.cashierName(), t.vat_inclusive ? 1 : 0, tot.vatOn ? t.vat_rate : 0,
        tot.service, tot.svcOn ? t.service_charge_rate : 0, t.currency, 'completed', 0, now]);
 
@@ -348,7 +350,8 @@
     });
 
     const saleRow = {
-      receipt_no: receiptNo, subtotal: tot.itemsNet, vat_amount: tot.vat, total: tot.total,
+      receipt_no: receiptNo, order_no: orderNo, order_date: orderDate,
+      subtotal: tot.itemsNet, vat_amount: tot.vat, total: tot.total,
       cash_received: cash, change_due: change, cashier: Config.cashierName(),
       vat_inclusive: t.vat_inclusive, vat_rate: tot.vatOn ? t.vat_rate : 0,
       service_charge: tot.service, service_charge_rate: tot.svcOn ? t.service_charge_rate : 0,
@@ -731,6 +734,9 @@
     $('#adminLock').style.display = unlocked ? 'none' : '';
     $('#adminPanel').style.display = unlocked ? '' : 'none';
     if (!unlocked) return;
+    // Cloud + admin details live here, behind the admin password.
+    $('#setApiBase').value = DB.getSetting('api_base') || '';
+    updateSyncPill();
     const q = tenantFilter.toLowerCase();
     const rows = DB.all('SELECT * FROM tenants ORDER BY name').filter((t) =>
       !q || (t.name + ' ' + (t.tin || '')).toLowerCase().includes(q));
@@ -831,10 +837,6 @@
     // Preselect last used tenant if still available.
     const last = DB.getSetting('active_tenant_id');
     if (last && tenants.find((t) => t.id === last)) sel.value = last;
-    // Show demo credentials only while the seeded shop still uses defaults.
-    const hint = $('#loginHint');
-    const seeded = DB.get("SELECT COUNT(*) AS n FROM staff WHERE username IN ('manager','cashier')");
-    hint.textContent = (seeded && seeded.n > 0) ? 'Demo logins — manager / 1234 · cashier / 4321' : '';
   }
 
   function updateTopbar() {
@@ -1102,6 +1104,44 @@
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
 
+  // Build a readable multi-sheet Excel workbook for the ACTIVE shop.
+  function exportWorkbook() {
+    if (typeof XLSX === 'undefined') { toast('Excel engine still loading — try again', 'err'); return; }
+    const t = Config.activeTenant(); const tid = t.id;
+    const wb = XLSX.utils.book_new();
+    const add = (name, rows) => XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows.length ? rows : [{}]), name.slice(0, 31));
+
+    add('Products', DB.all(`SELECT p.name AS Product, p.category AS Category, v.name AS Variation,
+        v.sku AS SKU, v.barcode AS Barcode, v.price AS Price, v.cost AS Cost, v.stock AS Stock,
+        v.low_stock_threshold AS LowAt, s.name AS Supplier
+      FROM variations v JOIN products p ON p.id=v.product_id
+      LEFT JOIN suppliers s ON s.id=v.supplier_id
+      WHERE v.tenant_id=? AND v.active=1 ORDER BY p.name, v.price`, [tid]));
+
+    add('Suppliers', DB.all(`SELECT name AS Supplier, contact AS Contact, phone AS Phone,
+        email AS Email, address AS Address FROM suppliers WHERE tenant_id=? ORDER BY name`, [tid]));
+
+    add('Sales', DB.all(`SELECT receipt_no AS Receipt, order_no AS OrderNo, created_at AS Time,
+        item_count AS Items, subtotal AS Net, vat_amount AS VAT, service_charge AS Service,
+        total AS Total, cash_received AS Cash, change_due AS Change, cashier AS Cashier,
+        currency AS Currency, (CASE WHEN synced=1 THEN 'yes' ELSE 'no' END) AS Synced
+      FROM sales WHERE tenant_id=? ORDER BY created_at DESC`, [tid]));
+
+    add('Sale items', DB.all(`SELECT s.receipt_no AS Receipt, si.name AS Item, si.sku AS SKU,
+        si.qty AS Qty, si.unit_price AS Price, si.line_total AS LineTotal
+      FROM sale_items si JOIN sales s ON s.id=si.sale_id
+      WHERE si.tenant_id=? ORDER BY s.created_at DESC`, [tid]));
+
+    // Staff WITHOUT password hashes.
+    add('Staff', DB.all(`SELECT name AS Name, username AS Username, role AS Role,
+        (CASE WHEN active=1 THEN 'active' ELSE 'disabled' END) AS Status
+      FROM staff WHERE tenant_id=? ORDER BY role DESC, name`, [tid]));
+
+    const safe = (t.name || 'shop').replace(/[^A-Za-z0-9]+/g, '-').toLowerCase();
+    XLSX.writeFile(wb, 'totals-pos-' + safe + '-' + Config.todayKey() + '.xlsx');
+    toast('Excel workbook downloaded', 'ok');
+  }
+
   /* ---------------- View switching ---------------- */
   function switchView(name) {
     $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.view === name));
@@ -1116,8 +1156,6 @@
   function loadSettings() {
     $('#setDevice').value = Config.deviceName();
     $('#setCashier').value = DB.getSetting('cashier_name') || '';
-    $('#setAdminPin').value = Config.adminPin();
-    $('#setApiBase').value = DB.getSetting('api_base') || '';
     // Sales / VAT / service charge for the active shop.
     const t = Config.activeTenant() || {};
     $('#setVatEnabled').checked = !!t.vat_enabled;
@@ -1264,12 +1302,21 @@
     $('#logoClearBtn').addEventListener('click', () => saveLogo(null));
     $('#logoFile').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) saveLogo(f); e.target.value = ''; });
 
-    // Settings — device
+    // Settings — device (manager-safe; no admin details here)
     $('#saveDeviceBtn').addEventListener('click', () => {
       DB.setSetting('device_name', $('#setDevice').value.trim() || 'Register 1');
       DB.setSetting('cashier_name', $('#setCashier').value.trim() || 'Cashier');
-      DB.setSetting('admin_pin', $('#setAdminPin').value.trim() || '1234');
       DB.persistNow(); toast('Saved', 'ok');
+    });
+    // Admin-only: change the admin PIN (lives behind the admin unlock).
+    $('#saveAdminPinBtn').addEventListener('click', () => {
+      if (!isAdminUnlocked()) { toast('Unlock admin first', 'err'); return; }
+      const a = $('#setAdminPin').value.trim(), b = $('#setAdminPin2').value.trim();
+      if (a.length < 4) { toast('Use at least 4 digits', 'err'); return; }
+      if (a !== b) { toast('PINs do not match', 'err'); return; }
+      DB.setSetting('admin_pin', a); DB.persistNow();
+      $('#setAdminPin').value = ''; $('#setAdminPin2').value = '';
+      toast('Admin PIN changed', 'ok');
     });
     $('#saveApiBtn').addEventListener('click', () => {
       DB.setSetting('api_base', $('#setApiBase').value.trim()); DB.persistNow();
@@ -1282,6 +1329,7 @@
       a.download = 'totals-pos-backup-' + new Date().toISOString().slice(0, 10) + '.sqlite'; a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     });
+    $('#backupXlsxBtn').addEventListener('click', exportWorkbook);
     $('#restoreBtn').addEventListener('click', () => $('#restoreFile').click());
     $('#restoreFile').addEventListener('change', async (e) => {
       const f = e.target.files[0]; if (!f) return;

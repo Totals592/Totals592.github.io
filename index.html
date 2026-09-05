@@ -30,7 +30,6 @@
       <input id="loginPin" type="password" inputmode="numeric" autocomplete="current-password" placeholder="PIN">
       <div id="loginErr" class="login-err"></div>
       <button class="charge" id="loginBtn" style="margin-top:14px">Sign in</button>
-      <p class="hint center" id="loginHint" style="margin-top:14px"></p>
     </div>
   </div>
 
@@ -177,8 +176,24 @@
               </div>
             </div>
             <div class="card">
-              <h3>Remote management</h3>
-              <p class="muted">Changes made here queue for the cloud and reach every register automatically once online. Administrators can also manage tenants centrally from the server’s admin API — see the Settings tab for the API base URL.</p>
+              <h3>Cloud sync</h3>
+              <p class="muted">Leave the API base URL empty to run as a standalone offline register. Point it at your deployed backend (see <code>server/</code>) to sync sales, stock and receive remote updates. Changes here queue for the cloud and reach every register automatically once online.</p>
+              <label>Cloud API base URL</label>
+              <input id="setApiBase" placeholder="https://your-backend.example.com">
+              <div class="toolbar" style="margin-top:12px">
+                <button class="btn brand" id="saveApiBtn">Save</button>
+                <button class="btn" id="syncNowBtn">Sync now</button>
+                <span class="pill"><span class="dot" id="syncDot2"></span><span id="lastSync">—</span></span>
+              </div>
+            </div>
+            <div class="card">
+              <h3>Administrator password</h3>
+              <p class="muted">Only administrators can change this. Managers and cashiers can never see or change it.</p>
+              <div class="grid2">
+                <div><label>New admin PIN</label><input id="setAdminPin" inputmode="numeric" type="password" placeholder="new PIN"></div>
+                <div><label>Confirm new admin PIN</label><input id="setAdminPin2" inputmode="numeric" type="password" placeholder="repeat PIN"></div>
+              </div>
+              <button class="btn brand" id="saveAdminPinBtn" style="margin-top:12px">Change admin PIN</button>
             </div>
           </div>
         </section>
@@ -191,19 +206,7 @@
               <div><label>Register / device name</label><input id="setDevice"></div>
               <div><label>Cashier name</label><input id="setCashier"></div>
             </div>
-            <label>Admin PIN</label><input id="setAdminPin" inputmode="numeric">
             <button class="btn brand" id="saveDeviceBtn" style="margin-top:12px">Save</button>
-          </div>
-          <div class="card">
-            <h3>Cloud sync</h3>
-            <p class="muted">Leave the API base URL empty to run as a standalone offline register. Point it at your deployed backend (see <code>server/</code>) to sync sales, stock and receive remote updates.</p>
-            <label>Cloud API base URL</label>
-            <input id="setApiBase" placeholder="https://your-backend.example.com">
-            <div class="toolbar" style="margin-top:12px">
-              <button class="btn brand" id="saveApiBtn">Save</button>
-              <button class="btn" id="syncNowBtn">Sync now</button>
-              <span class="pill"><span class="dot" id="syncDot2"></span><span id="lastSync">—</span></span>
-            </div>
           </div>
           <div class="card" id="taxCard">
             <h3>Sales, VAT &amp; service charge</h3>
@@ -250,11 +253,12 @@
             <h3>Backup & data</h3>
             <div class="toolbar">
               <button class="btn" id="backupBtn">Download backup (.sqlite)</button>
+              <button class="btn" id="backupXlsxBtn">Download Excel (.xlsx)</button>
               <button class="btn" id="restoreBtn">Restore backup</button>
               <input type="file" id="restoreFile" accept=".sqlite,.db" hidden>
               <button class="btn danger" id="wipeBtn">Erase all local data</button>
             </div>
-            <p class="hint">The backup is the full SQLite database used by this register.</p>
+            <p class="hint">The <b>.sqlite</b> backup is the full database and is the one you restore from. The <b>.xlsx</b> export is a readable Excel workbook (products, stock, sales, staff, suppliers) for reporting — it is not used for restore.</p>
           </div>
           <div class="card">
             <h3>About</h3>
@@ -283,6 +287,8 @@
   <!-- ZXing is only a fallback; loaded lazily by scan.js when the native
        BarcodeDetector API is unavailable. -->
   <script src="./vendor/zxing.min.js" defer></script>
+  <!-- SheetJS for the Excel (.xlsx) backup export. -->
+  <script src="./vendor/xlsx.full.min.js" defer></script>
   <script src="./js/scan.js"></script>
   <script src="./js/app.js"></script>
 </body>

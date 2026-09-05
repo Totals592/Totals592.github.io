@@ -6,7 +6,7 @@
 window.Config = (function () {
   'use strict';
 
-  const CURRENCY_SYMBOLS = { GHS: '₵', USD: '$', EUR: '€', GBP: '£', NGN: '₦', KES: 'KSh', ZAR: 'R' };
+  const CURRENCY_SYMBOLS = { GYD: 'G$', GHS: '₵', USD: '$', EUR: '€', GBP: '£', NGN: '₦', KES: 'KSh', ZAR: 'R' };
 
   function money(n, currency) {
     const sym = CURRENCY_SYMBOLS[currency] || (currency ? currency + ' ' : '');
@@ -54,6 +54,25 @@ window.Config = (function () {
     return (prefix || 'RCT') + '-' + String(n).padStart(6, '0');
   }
 
+  // Local calendar date as YYYY-MM-DD (used to reset the daily order number).
+  function todayKey(d) {
+    d = d || new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  }
+
+  /*
+   * Daily order number for food service. Counts up per tenant and starts again
+   * at 1 each calendar day, so tickets read "Order #1, #2, …" every morning.
+   */
+  function nextOrderNo(tenantId) {
+    const day = todayKey();
+    const key = 'order_seq_' + tenantId + '_' + day;
+    const n = parseInt(DB.getSetting(key) || '0', 10) + 1;
+    DB.setSetting(key, n);
+    return n;
+  }
+
   function escapeHtml(s) {
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -92,7 +111,7 @@ window.Config = (function () {
     CURRENCY_SYMBOLS, money, vatBreakdown,
     activeTenantId, activeTenant, setActiveTenant,
     apiBase, deviceName, cashierName: cashierNameResolved, adminPin,
-    nextReceiptNo, escapeHtml,
+    nextReceiptNo, nextOrderNo, todayKey, escapeHtml,
     randomSalt, hashPin, currentSession, setSession, currentRole
   };
 })();
