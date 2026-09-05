@@ -137,6 +137,8 @@ window.DB = (function () {
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
     receipt_no TEXT,
+    order_no INTEGER,
+    order_date TEXT,
     subtotal REAL,
     vat_amount REAL,
     total REAL,
@@ -313,6 +315,8 @@ window.DB = (function () {
     ensureColumn('tenants', 'service_charge_show_receipt', 'INTEGER DEFAULT 1');
     ensureColumn('sales', 'service_charge', 'REAL DEFAULT 0');
     ensureColumn('sales', 'service_charge_rate', 'REAL DEFAULT 0');
+    ensureColumn('sales', 'order_no', 'INTEGER');
+    ensureColumn('sales', 'order_date', 'TEXT');
   }
 
   /* ---------- Init ---------- */
