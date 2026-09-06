@@ -124,10 +124,35 @@ create index if not exists idx_sales_tenant on sales(tenant_id);
 The `seq bigserial` columns give the cursor the app's `/api/pull` uses: the
 function returns rows whose `seq` is greater than the register's last cursor.
 
-## 3. The sync Edge Function
+## 3. The sync API
 
-This implements the SAME contract the app already speaks, so the only client
-change is the API base URL. Create `supabase/functions/api/index.ts`:
+You need one small server that implements `/api/sync` and `/api/pull` against
+Supabase. **Recommended path (no CLI, no Edge-Function UI): run it as a Netlify
+Function — it already ships in this repo.**
+
+### 3A. Recommended — Netlify Function (already in the repo)
+
+The repo contains `netlify/functions/api.mjs`, `netlify.toml`, and a root
+`package.json`. When you connect this repo to Netlify (section 5), Netlify builds
+and hosts the function automatically and maps `/api/*` to it. There is nothing to
+paste or deploy by hand — you only set two environment variables in Netlify:
+
+| Netlify env var | Where to get it |
+|-----------------|-----------------|
+| `SUPABASE_URL` | Supabase → Project Settings → API → Project URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Project Settings → API → **service_role** key (secret) |
+
+Set them under **Netlify → Site configuration → Environment variables**, then
+redeploy. Your API base URL is simply **your Netlify site URL** (e.g.
+`https://your-site.netlify.app`) — the app appends `/api/sync` and `/api/pull`.
+The service-role key stays on Netlify's servers and is never sent to browsers.
+
+Skip to section 4. (Section 3B below is only if you prefer Supabase Edge
+Functions instead — you do not need both.)
+
+### 3B. Alternative — Supabase Edge Function (needs the Supabase CLI)
+
+This implements the SAME contract. Create `supabase/functions/api/index.ts`:
 
 ```ts
 import { serve } from "https://deno.land/std/http/server.ts";
@@ -209,10 +234,14 @@ supabase functions deploy api --no-verify-jwt   # test milestone; add JWT for pr
 Your API base becomes:
 `https://<project-ref>.functions.supabase.co/api`
 
-## 4. Point the app at Supabase
+## 4. Point the app at the sync API
 
-In the running app: **Admin → unlock → Cloud sync → Cloud API base URL** =
-`https://<project-ref>.functions.supabase.co/api` → Save → Sync now.
+In the running app: **Admin → unlock → Cloud sync → Cloud API base URL**, then
+Save → Sync now:
+
+- **Netlify Function path (3A):** use your **Netlify site URL**, e.g.
+  `https://your-site.netlify.app`
+- **Edge Function path (3B):** use `https://<project-ref>.functions.supabase.co/api`
 
 Each register now pushes sales/stock and pulls catalogue/tenant/staff changes
 from Supabase. (`/api/sync` and `/api/pull` are appended by the app.)
