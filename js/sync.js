@@ -100,19 +100,20 @@ window.Sync = (function () {
     if (!newer(t, 'tenants')) return;
     DB.run(`INSERT INTO tenants(id,name,slug,tin,phone,email,address,currency,vat_rate,vat_inclusive,
         vat_enabled,vat_show_receipt,service_charge_enabled,service_charge_rate,service_charge_show_receipt,
-        receipt_footer,logo,status,updated_at,created_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        logo_on_receipt,categories,receipt_footer,logo,status,updated_at,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET name=excluded.name,slug=excluded.slug,tin=excluded.tin,phone=excluded.phone,
         email=excluded.email,address=excluded.address,currency=excluded.currency,vat_rate=excluded.vat_rate,
         vat_inclusive=excluded.vat_inclusive,vat_enabled=excluded.vat_enabled,vat_show_receipt=excluded.vat_show_receipt,
         service_charge_enabled=excluded.service_charge_enabled,service_charge_rate=excluded.service_charge_rate,
         service_charge_show_receipt=excluded.service_charge_show_receipt,
+        logo_on_receipt=excluded.logo_on_receipt,categories=excluded.categories,
         receipt_footer=excluded.receipt_footer,logo=excluded.logo,
         status=excluded.status,updated_at=excluded.updated_at`,
-      [t.id, t.name, t.slug, t.tin, t.phone, t.email, t.address, t.currency || 'GHS',
+      [t.id, t.name, t.slug, t.tin, t.phone, t.email, t.address, t.currency || 'GYD',
        t.vat_rate ?? 15, t.vat_inclusive ?? 1, t.vat_enabled ?? 1, t.vat_show_receipt ?? 1,
        t.service_charge_enabled ?? 0, t.service_charge_rate ?? 0, t.service_charge_show_receipt ?? 1,
-       t.receipt_footer, t.logo, t.status || 'active',
+       t.logo_on_receipt ?? 1, t.categories ?? null, t.receipt_footer, t.logo, t.status || 'active',
        t.updated_at || DB.nowISO(), t.created_at || DB.nowISO()]);
   }
   function upsertProduct(p) {

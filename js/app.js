@@ -8,7 +8,7 @@
 
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
-  const money = (n) => Config.money(n, (Config.activeTenant() || {}).currency || 'GHS');
+  const money = (n) => Config.money(n, (Config.activeTenant() || {}).currency || 'GYD');
   const esc = Config.escapeHtml;
 
   /* ---------------- Toasts & modal ---------------- */
@@ -451,6 +451,35 @@
     });
   }
 
+  // The category list for the active shop: the tenant's own headers, plus
+  // sensible defaults, plus any categories already used by products.
+  const DEFAULT_CATEGORIES = ['Food', 'Drinks', 'Desserts', 'Snacks', 'Services', 'General'];
+  function tenantCategories(t) {
+    let custom = [];
+    try { custom = JSON.parse((t && t.categories) || '[]'); } catch (e) { custom = []; }
+    const used = DB.all('SELECT DISTINCT category FROM products WHERE tenant_id = ? AND category IS NOT NULL', [t.id])
+      .map((r) => r.category).filter(Boolean);
+    const seen = new Set(); const out = [];
+    [...custom, ...DEFAULT_CATEGORIES, ...used].forEach((c) => {
+      const k = String(c).trim(); if (k && !seen.has(k.toLowerCase())) { seen.add(k.toLowerCase()); out.push(k); }
+    });
+    return out;
+  }
+  // Persist the tenant's category list (array of names) and sync it.
+  function setTenantCategories(list) {
+    const t = Config.activeTenant();
+    const json = JSON.stringify(list);
+    const now = DB.nowISO();
+    DB.run('UPDATE tenants SET categories=?, updated_at=? WHERE id=?', [json, now, t.id]);
+    Sync.queue('tenant', t.id, 'update', { id: t.id, categories: json, updated_at: now }, t.id);
+    DB.persistNow();
+  }
+  function addTenantCategory(name) {
+    const t = Config.activeTenant();
+    let list = []; try { list = JSON.parse(t.categories || '[]'); } catch (e) {}
+    if (!list.some((c) => String(c).toLowerCase() === name.toLowerCase())) { list.push(name); setTenantCategories(list); }
+  }
+
   function productModal(pid, prefillBarcode) {
     const tid = Config.activeTenantId();
     const editing = !!pid;
@@ -490,7 +519,17 @@
       <div class="body">
         <div class="grid2">
           <div><label>Name</label><input id="pName" value="${esc(p.name)}"></div>
-          <div><label>Category</label><input id="pCat" value="${esc(p.category || '')}"></div>
+          <div><label>Category</label>
+            <select id="pCat">
+              ${(() => {
+                const cats = tenantCategories(Config.activeTenant());
+                const cur = p.category || 'General';
+                if (cur && !cats.some((c) => c.toLowerCase() === cur.toLowerCase())) cats.unshift(cur);
+                return cats.map((c) => `<option value="${esc(c)}" ${c === cur ? 'selected' : ''}>${esc(c)}</option>`).join('')
+                  + '<option value="__new__">➕ Add new category…</option>';
+              })()}
+            </select>
+          </div>
         </div>
         <label>Description</label><input id="pDesc" value="${esc(p.description || '')}">
         <div class="grid2">
@@ -525,6 +564,23 @@
     });
     if ($('#pImgClear', m)) $('#pImgClear', m).addEventListener('click', () => {
       image = ''; $('#pImgPrev', m).style.display = 'none';
+    });
+
+    // "Add new category…" — prompt, insert as a selected option, and (best
+    // effort) add it to the tenant's saved category list so it persists.
+    let prevCat = $('#pCat', m).value;
+    $('#pCat', m).addEventListener('change', (e) => {
+      const sel = e.target;
+      if (sel.value !== '__new__') { prevCat = sel.value; return; }
+      const name = (prompt('New category name') || '').trim();
+      if (!name) { sel.value = prevCat; return; }
+      if (!Array.from(sel.options).some((o) => o.value.toLowerCase() === name.toLowerCase())) {
+        const opt = document.createElement('option');
+        opt.value = name; opt.textContent = name;
+        sel.insertBefore(opt, sel.querySelector('option[value="__new__"]'));
+      }
+      sel.value = name; prevCat = name;
+      addTenantCategory(name);
     });
 
     function bindVarDeletes() {
@@ -568,7 +624,7 @@
       const collected = collectVars();
       let productId = pid;
       const payload = {
-        name, category: $('#pCat', m).value.trim() || 'General',
+        name, category: (($('#pCat', m).value || '').trim() === '__new__' ? '' : $('#pCat', m).value.trim()) || 'General',
         description: $('#pDesc', m).value.trim(), color: $('#pColor', m).value,
         image, active: parseInt($('#pActive', m).value, 10)
       };
@@ -685,7 +741,9 @@
     const tid = Config.activeTenantId();
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const sales = DB.all('SELECT * FROM sales WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 100', [tid]);
-    const todaySales = sales.filter((s) => new Date(s.created_at) >= today);
+    const isVoid = (s) => (s.status || 'completed') === 'voided';
+    // Voided sales are excluded from all money figures.
+    const todaySales = sales.filter((s) => new Date(s.created_at) >= today && !isVoid(s));
     const todayTotal = todaySales.reduce((s, r) => s + r.total, 0);
     const pending = DB.get('SELECT COUNT(*) AS n FROM sales WHERE tenant_id=? AND synced=0', [tid]);
 
@@ -700,13 +758,22 @@
       kpi(cash(todaySales.reduce((s, r) => s + r.vat_amount, 0)), 'VAT collected today') +
       kpi(pending ? pending.n : 0, 'Unsynced sales');
 
-    $('#salesTable tbody').innerHTML = sales.map((s) => `<tr>
-      <td>${esc(s.receipt_no)}</td>
-      <td>${new Date(s.created_at).toLocaleString()}</td>
-      <td>${s.item_count}</td><td>${cash(s.total)}</td><td>${cash(s.cash_received)}</td>
-      <td>${s.synced ? '<span class="badge ok">Synced</span>' : '<span class="badge">Pending</span>'}</td>
-      <td><button class="btn small" data-reprint="${s.id}">Receipt</button></td>
-    </tr>`).join('') || '<tr><td colspan="7" class="muted center">No sales yet.</td></tr>';
+    const canEdit = canManage();
+    $('#salesTable tbody').innerHTML = sales.map((s) => {
+      const voided = isVoid(s);
+      const actions = voided
+        ? `<button class="btn small" data-reprint="${s.id}">Receipt</button>`
+        : `<button class="btn small" data-reprint="${s.id}">Receipt</button>` +
+          (canEdit ? ` <button class="btn small" data-editsale="${s.id}">Edit</button>` +
+                     ` <button class="btn small danger" data-voidsale="${s.id}">Void</button>` : '');
+      return `<tr${voided ? ' style="opacity:.55"' : ''}>
+        <td>${esc(s.receipt_no)}${voided ? ' <span class="badge">Voided</span>' : ''}</td>
+        <td>${new Date(s.created_at).toLocaleString()}</td>
+        <td>${s.item_count}</td><td>${cash(s.total)}</td><td>${cash(s.cash_received)}</td>
+        <td>${s.synced ? '<span class="badge ok">Synced</span>' : '<span class="badge">Pending</span>'}</td>
+        <td><div class="row-actions">${actions}</div></td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="7" class="muted center">No sales yet.</td></tr>';
 
     const low = DB.all(`
       SELECT v.*, p.name AS pname, s.name AS supplier_name FROM variations v
@@ -724,6 +791,56 @@
     const items = DB.all('SELECT * FROM sale_items WHERE sale_id = ?', [saleId]);
     const t = DB.get('SELECT * FROM tenants WHERE id = ?', [s.tenant_id]);
     Receipt.print(s, items, t);
+  }
+
+  // Void a sale: mark it voided, return its items to stock, and sync. Kept in
+  // the list (struck through) as an audit trail; excluded from all figures.
+  function voidSale(saleId, silent) {
+    const s = DB.get('SELECT * FROM sales WHERE id = ?', [saleId]);
+    if (!s || (s.status || 'completed') === 'voided') return s;
+    if (!silent && !confirm('Void this order? Its items go back into stock and it is removed from sales totals.')) return null;
+    const now = DB.nowISO();
+    // Return stock for tracked items.
+    DB.all('SELECT * FROM sale_items WHERE sale_id = ?', [saleId]).forEach((it) => {
+      if (!it.variation_id) return;
+      const v = DB.get('SELECT stock, track_stock FROM variations WHERE id = ?', [it.variation_id]);
+      if (v && v.track_stock) {
+        const ns = Number(v.stock) + Number(it.qty);
+        DB.run('UPDATE variations SET stock=?, updated_at=? WHERE id=?', [ns, now, it.variation_id]);
+        Sync.queue('stock', it.variation_id, 'set', { stock: ns }, s.tenant_id);
+      }
+    });
+    DB.run("UPDATE sales SET status='voided' WHERE id=?", [saleId]);
+    // Push the voided status up (upsert of the sale record with status voided).
+    Sync.queue('sale', saleId, 'update',
+      { sale: { id: saleId, tenant_id: s.tenant_id, status: 'voided' } }, s.tenant_id);
+    DB.persistNow();
+    if (!silent) { renderReports(); renderPOS(); updateSyncPill(); toast('Order voided', 'ok'); }
+    return s;
+  }
+
+  // Edit a sale: void the original and reload its items into the cart so the
+  // cashier can correct it and charge again.
+  function editSale(saleId) {
+    const s = DB.get('SELECT * FROM sales WHERE id = ?', [saleId]);
+    if (!s || (s.status || 'completed') === 'voided') return;
+    if (!confirm('Edit this order? It will be voided and its items loaded back into a new sale to re-ring.')) return;
+    const items = DB.all('SELECT * FROM sale_items WHERE sale_id = ?', [saleId]);
+    voidSale(saleId, true); // silent void + restock
+    // Rebuild the cart from the sale's items using current variation data.
+    cart = [];
+    items.forEach((it) => {
+      const v = it.variation_id ? DB.get('SELECT * FROM variations WHERE id = ?', [it.variation_id]) : null;
+      cart.push({
+        variation_id: it.variation_id, product_id: it.product_id, name: it.name, sku: it.sku,
+        unit_price: it.unit_price, qty: it.qty,
+        track_stock: v ? !!v.track_stock : false, stock: v ? v.stock : 0
+      });
+    });
+    DB.persistNow();
+    renderReports(); renderCart(); renderPOS(); updateSyncPill();
+    switchView('pos');
+    toast('Order loaded for editing — adjust and charge again', 'ok');
   }
 
   /* ---------------- Admin (tenant management) ---------------- */
@@ -759,7 +876,7 @@
   function tenantModal(tid) {
     const editing = !!tid;
     const t = editing ? DB.get('SELECT * FROM tenants WHERE id = ?', [tid])
-      : { currency: 'GHS', vat_rate: 15, vat_inclusive: 1, status: 'active' };
+      : { currency: 'GYD', vat_rate: 15, vat_inclusive: 1, status: 'active' };
     const curOpts = Object.keys(Config.CURRENCY_SYMBOLS).map((c) =>
       `<option value="${c}" ${t.currency === c ? 'selected' : ''}>${c}</option>`).join('');
     openModal(`
@@ -830,13 +947,21 @@
   }
 
   function populateLoginTenants() {
-    const sel = $('#loginTenant');
-    const tenants = activeTenants();
-    sel.innerHTML = tenants.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join('') ||
-      '<option value="">No active shops — ask an administrator</option>';
-    // Preselect last used tenant if still available.
+    // Prefill this device's last shop name for convenience (no dropdown of all
+    // shops, so other tenants' names are not exposed).
     const last = DB.getSetting('active_tenant_id');
-    if (last && tenants.find((t) => t.id === last)) sel.value = last;
+    const t = last ? DB.get('SELECT name FROM tenants WHERE id = ?', [last]) : null;
+    const field = $('#loginShop');
+    if (field && t && !field.value) field.value = t.name;
+  }
+
+  // Resolve a typed shop name to an active tenant (case/space-insensitive).
+  function findTenantByName(name) {
+    const norm = String(name || '').trim().toLowerCase();
+    if (!norm) return null;
+    return activeTenants().find((t) =>
+      (t.name || '').trim().toLowerCase() === norm ||
+      (t.slug || '').trim().toLowerCase() === norm) || null;
   }
 
   function updateTopbar() {
@@ -898,17 +1023,19 @@
   function hideLogin() { $('#loginBack').classList.remove('open'); }
 
   async function attemptLogin() {
-    const tid = $('#loginTenant').value;
+    const shop = $('#loginShop').value;
     const user = $('#loginUser').value.trim().toLowerCase();
     const pin = $('#loginPin').value;
     const err = $('#loginErr');
-    if (!tid) { err.textContent = 'No shop selected.'; return; }
+    if (!shop.trim()) { err.textContent = 'Enter your shop name.'; return; }
     if (!user || !pin) { err.textContent = 'Enter your username and PIN.'; return; }
-    const staff = DB.get('SELECT * FROM staff WHERE tenant_id = ? AND lower(username) = ? AND active = 1', [tid, user]);
+    const tenant = findTenantByName(shop);
+    if (!tenant) { err.textContent = 'Shop not found on this device. Check the name, or sync first.'; return; }
+    const staff = DB.get('SELECT * FROM staff WHERE tenant_id = ? AND lower(username) = ? AND active = 1', [tenant.id, user]);
     if (!staff) { err.textContent = 'Unknown user for this shop.'; return; }
     const hash = await Config.hashPin(pin, staff.salt);
     if (hash !== staff.pin_hash) { err.textContent = 'Incorrect PIN.'; return; }
-    signInAs({ tenant_id: tid, staff_id: staff.id, name: staff.name, role: staff.role });
+    signInAs({ tenant_id: tenant.id, staff_id: staff.id, name: staff.name, role: staff.role });
   }
 
   function signInAs(session) {
@@ -1166,6 +1293,9 @@
     $('#setSvcRate').value = t.service_charge_rate != null ? t.service_charge_rate : 0;
     $('#setSvcShow').checked = t.service_charge_show_receipt !== 0;
     $('#logoPrev').src = t.logo || './icons/icon.svg';
+    $('#setLogoOnReceipt').checked = t.logo_on_receipt !== 0;
+    let cats = []; try { cats = JSON.parse(t.categories || '[]'); } catch (e) {}
+    $('#setCategories').value = cats.join('\n');
     renderStaff();
     updateSyncPill();
   }
@@ -1177,6 +1307,7 @@
 
     // Login / sign out
     $('#loginBtn').addEventListener('click', attemptLogin);
+    $('#loginShop').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#loginUser').focus(); });
     $('#loginPin').addEventListener('keydown', (e) => { if (e.key === 'Enter') attemptLogin(); });
     $('#loginUser').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#loginPin').focus(); });
     $('#signOutBtn').addEventListener('click', signOut);
@@ -1193,11 +1324,6 @@
       title: 'Scan items to sell', continuous: true, onCode: addByBarcode
     }));
     $('#clearBtn').addEventListener('click', () => { if (cart.length && confirm('Clear the current sale?')) { cart = []; renderCart(); } });
-    $('#holdBtn').addEventListener('click', () => {
-      if (!cart.length) return;
-      sessionStorage.setItem('held_' + Config.activeTenantId(), JSON.stringify(cart));
-      cart = []; renderCart(); toast('Sale held');
-    });
 
     // Inventory
     $('#scanAddBtn').addEventListener('click', () => openScanner({
@@ -1229,7 +1355,11 @@
 
     // Reports
     $('#repShowFigures').addEventListener('change', (e) => { repShowFigures = e.target.checked; renderReports(); });
-    $('#salesTable').addEventListener('click', (e) => { const b = e.target.closest('[data-reprint]'); if (b) reprint(b.dataset.reprint); });
+    $('#salesTable').addEventListener('click', (e) => {
+      const rp = e.target.closest('[data-reprint]'); if (rp) return reprint(rp.dataset.reprint);
+      const ed = e.target.closest('[data-editsale]'); if (ed) return editSale(ed.dataset.editsale);
+      const vd = e.target.closest('[data-voidsale]'); if (vd) return voidSale(vd.dataset.voidsale);
+    });
     $('#exportSalesBtn').addEventListener('click', () => {
       if (!repShowFigures) { toast('Tick “Show sales & income figures” first', 'err'); return; }
       const tid = Config.activeTenantId();
@@ -1301,6 +1431,23 @@
     $('#logoUploadBtn').addEventListener('click', () => $('#logoFile').click());
     $('#logoClearBtn').addEventListener('click', () => saveLogo(null));
     $('#logoFile').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) saveLogo(f); e.target.value = ''; });
+    $('#saveBrandingBtn').addEventListener('click', () => {
+      const t = Config.activeTenant(); const now = DB.nowISO();
+      const on = $('#setLogoOnReceipt').checked ? 1 : 0;
+      DB.run('UPDATE tenants SET logo_on_receipt=?, updated_at=? WHERE id=?', [on, now, t.id]);
+      Sync.queue('tenant', t.id, 'update', { id: t.id, logo_on_receipt: on, updated_at: now }, t.id);
+      DB.persistNow(); toast('Branding saved', 'ok');
+    });
+
+    // Settings — product categories (headers)
+    $('#saveCategoriesBtn').addEventListener('click', () => {
+      const list = $('#setCategories').value.split('\n').map((s) => s.trim()).filter(Boolean);
+      // de-dupe, keep order
+      const seen = new Set(); const clean = [];
+      list.forEach((c) => { const k = c.toLowerCase(); if (!seen.has(k)) { seen.add(k); clean.push(c); } });
+      setTenantCategories(clean);
+      toast('Categories saved', 'ok');
+    });
 
     // Settings — device (manager-safe; no admin details here)
     $('#saveDeviceBtn').addEventListener('click', () => {
@@ -1414,9 +1561,6 @@
       applyRoleGating();
       updateTopbar();
       renderPOS(); renderCart();
-      // Restore a held sale if present.
-      const held = sessionStorage.getItem('held_' + Config.activeTenantId());
-      if (held) { try { cart = JSON.parse(held); sessionStorage.removeItem('held_' + Config.activeTenantId()); renderCart(); } catch (e) {} }
     } else {
       Config.setSession(null);
       showLogin();

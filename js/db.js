@@ -73,7 +73,7 @@ window.DB = (function () {
     phone TEXT,
     email TEXT,
     address TEXT,
-    currency TEXT DEFAULT 'GHS',
+    currency TEXT DEFAULT 'GYD',
     vat_rate REAL DEFAULT 15,
     vat_inclusive INTEGER DEFAULT 1,
     vat_enabled INTEGER DEFAULT 1,
@@ -81,6 +81,8 @@ window.DB = (function () {
     service_charge_enabled INTEGER DEFAULT 0,
     service_charge_rate REAL DEFAULT 0,
     service_charge_show_receipt INTEGER DEFAULT 1,
+    logo_on_receipt INTEGER DEFAULT 1,
+    categories TEXT,
     receipt_footer TEXT,
     logo TEXT,
     status TEXT DEFAULT 'active',
@@ -244,7 +246,7 @@ window.DB = (function () {
     run(`INSERT INTO tenants(id,name,slug,tin,phone,email,address,currency,vat_rate,vat_inclusive,receipt_footer,status,updated_at,created_at)
          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [tid, 'Corner Store Demo', 'corner-store', 'C0001234567', '+233 20 000 0000',
-       'shop@example.com', '12 Market Street, Accra', 'GHS', 15, 1,
+       'shop@example.com', '12 Market Street, Accra', 'GYD', 15, 1,
        'Thank you for your purchase! Goods sold are not returnable.', 'active', ts, ts]);
 
     setSetting('active_tenant_id', tid);
@@ -317,6 +319,8 @@ window.DB = (function () {
     ensureColumn('sales', 'service_charge_rate', 'REAL DEFAULT 0');
     ensureColumn('sales', 'order_no', 'INTEGER');
     ensureColumn('sales', 'order_date', 'TEXT');
+    ensureColumn('tenants', 'logo_on_receipt', 'INTEGER DEFAULT 1');
+    ensureColumn('tenants', 'categories', 'TEXT');
   }
 
   /* ---------- Init ---------- */

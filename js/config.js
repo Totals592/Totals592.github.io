@@ -6,12 +6,17 @@
 window.Config = (function () {
   'use strict';
 
-  const CURRENCY_SYMBOLS = { GYD: 'G$', GHS: '₵', USD: '$', EUR: '€', GBP: '£', NGN: '₦', KES: 'KSh', ZAR: 'R' };
+  const CURRENCY_SYMBOLS = { GYD: '$', GHS: '₵', USD: '$', EUR: '€', GBP: '£', NGN: '₦', KES: 'KSh', ZAR: 'R' };
 
+  // Whole numbers show with no decimals (e.g. $12), fractional amounts keep two
+  // (e.g. $12.50). Thousands are grouped with commas.
   function money(n, currency) {
     const sym = CURRENCY_SYMBOLS[currency] || (currency ? currency + ' ' : '');
-    const v = (Math.round((Number(n) || 0) * 100) / 100).toFixed(2);
-    return sym + v.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    const v = Math.round((Number(n) || 0) * 100) / 100;
+    const s = Number.isInteger(v) ? String(v) : v.toFixed(2);
+    const parts = s.split('.');
+    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return sym + parts.join('.');
   }
 
   /*
