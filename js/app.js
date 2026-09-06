@@ -1469,6 +1469,21 @@
       DB.setSetting('api_base', $('#setApiBase').value.trim()); DB.persistNow();
       updateSyncPill(); Sync.run(true); toast('Cloud settings saved', 'ok');
     });
+    $('#testCloudBtn').addEventListener('click', async () => {
+      const el = $('#cloudTestResult');
+      const base = $('#setApiBase').value.trim();
+      el.style.color = 'var(--muted)'; el.textContent = 'Testing connection…';
+      try {
+        const r = await Sync.test(base);
+        el.style.color = 'var(--ok)';
+        el.textContent = '✓ Connected — ' + r.tenants + ' tenant(s) on the server, cursor ' + r.cursor + '.';
+        toast('Cloud connection OK', 'ok');
+      } catch (e) {
+        el.style.color = 'var(--danger)';
+        el.textContent = '✗ ' + ((e && e.message) || e) + '  — check the URL is your function domain (no /api) and the function is deployed.';
+        toast('Connection failed', 'err');
+      }
+    });
     $('#syncNowBtn').addEventListener('click', () => { if (!Sync.configured()) { toast('Set an API base URL first', 'err'); return; } Sync.run(true); });
     $('#backupBtn').addEventListener('click', () => {
       const blob = new Blob([DB.export()], { type: 'application/octet-stream' });
