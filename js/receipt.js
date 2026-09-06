@@ -34,7 +34,7 @@ window.Receipt = (function () {
     return `
     <div class="rcpt">
       <div class="hdr">
-        ${tenant.logo ? `<img class="logo" src="${e(tenant.logo)}" alt="">` : ''}
+        ${tenant.logo && tenant.logo_on_receipt !== 0 ? `<img class="logo" src="${e(tenant.logo)}" alt="">` : ''}
         <div class="biz">${e(tenant.name)}</div>
         ${tenant.address ? `<div class="line">${e(tenant.address)}</div>` : ''}
         ${tenant.phone ? `<div class="line">Tel: ${e(tenant.phone)}</div>` : ''}

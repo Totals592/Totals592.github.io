@@ -22,8 +22,8 @@
     <div class="login-card">
       <div class="brand" style="justify-content:center;font-size:22px;margin-bottom:6px"><img src="./icons/icon.svg" alt=""> Totals POS</div>
       <p class="muted center" style="margin-top:0">Sign in to your shop</p>
-      <label>Shop</label>
-      <select id="loginTenant"></select>
+      <label>Shop name</label>
+      <input id="loginShop" placeholder="Type your shop name" autocomplete="off">
       <label>Username</label>
       <input id="loginUser" autocomplete="username" placeholder="e.g. manager">
       <label>PIN</label>
@@ -80,7 +80,6 @@
               </div>
               <div class="cart-actions">
                 <button class="btn accent small" id="scanSellBtn">📷 Scan</button>
-                <button class="btn ghost small" id="holdBtn">Hold</button>
                 <button class="btn danger small" id="clearBtn">Clear</button>
               </div>
             </aside>
@@ -232,12 +231,20 @@
           </div>
           <div class="card" id="brandingCard">
             <h3>Shop logo</h3>
-            <p class="muted">Shown in the top-left corner and printed on receipts. Tap the logo in the top-left corner at any time to change it.</p>
+            <p class="muted">Shown in the top-left corner. Tap the logo in the top-left corner at any time to change it.</p>
             <div class="toolbar">
               <img class="thumb" id="logoPrev" alt="" style="width:64px;height:64px">
               <button class="btn" id="logoUploadBtn">Upload logo</button>
               <button class="btn danger" id="logoClearBtn">Remove</button>
             </div>
+            <label class="switch" style="margin-top:12px"><input type="checkbox" id="setLogoOnReceipt"> Print logo on receipts</label>
+            <button class="btn brand" id="saveBrandingBtn" style="margin-top:8px">Save</button>
+          </div>
+          <div class="card" id="catCard">
+            <div class="section-title"><h3>Product categories (headers)</h3></div>
+            <p class="muted">The list of categories/headers you sell under (e.g. Food, Drinks, Desserts). These appear in the category dropdown when you add or edit a product. One per line.</p>
+            <textarea id="setCategories" rows="6" placeholder="Food&#10;Drinks&#10;Desserts"></textarea>
+            <button class="btn brand" id="saveCategoriesBtn" style="margin-top:10px">Save categories</button>
           </div>
           <div class="card" id="staffCard">
             <div class="section-title"><h3>Staff for this shop</h3><button class="btn small brand" id="addStaffBtn">+ Staff</button></div>
@@ -268,10 +275,6 @@
       </main>
     </div>
 
-    <!-- Footer -->
-    <footer class="footbar">
-      <span class="soon"><span class="tag">SOON</span> Delivery Tracking Coming Soon</span>
-    </footer>
   </div>
 
   <!-- Modal host -->

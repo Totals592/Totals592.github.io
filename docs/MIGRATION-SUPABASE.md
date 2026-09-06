@@ -60,6 +60,8 @@ create table if not exists tenants (
   service_charge_enabled int default 0,
   service_charge_rate numeric default 0,
   service_charge_show_receipt int default 1,
+  logo_on_receipt int default 1,
+  categories text,
   receipt_footer text,
   logo text,
   status text default 'active',
