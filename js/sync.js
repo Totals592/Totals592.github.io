@@ -181,5 +181,17 @@ window.Sync = (function () {
     run(false);
   }
 
-  return { start, run, queue, pendingCount, onChange, configured, isOnline };
+  // Ping the sync API (optionally a not-yet-saved base) and report what it says.
+  async function test(baseOverride) {
+    const base = (baseOverride != null ? baseOverride : Config.apiBase() || '').replace(/\/+$/, '');
+    if (!base) throw new Error('No API base URL set');
+    const res = await fetch(base + '/api/pull?since=0', { headers: { 'Content-Type': 'application/json' } });
+    if (!res.ok) throw new Error('HTTP ' + res.status + ' from server');
+    let j;
+    try { j = await res.json(); } catch (e) { throw new Error('Server did not return JSON (wrong URL?)'); }
+    if (!('cursor' in j)) throw new Error('Unexpected response (is this the sync API?)');
+    return { ok: true, tenants: (j.tenants || []).length, cursor: j.cursor };
+  }
+
+  return { start, run, test, queue, pendingCount, onChange, configured, isOnline };
 })();
