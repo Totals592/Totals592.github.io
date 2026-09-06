@@ -231,8 +231,11 @@ supabase link --project-ref <your-project-ref>
 supabase functions deploy api --no-verify-jwt   # test milestone; add JWT for prod
 ```
 
-Your API base becomes:
-`https://<project-ref>.functions.supabase.co/api`
+The function's own URL is `https://<project-ref>.functions.supabase.co/api`, but
+in the **app** set the Cloud API base URL to the domain only —
+`https://<project-ref>.functions.supabase.co` — because the app appends
+`/api/sync` and `/api/pull` itself. Name the function `api` and turn its
+**Verify JWT** setting OFF for the test milestone.
 
 ## 4. Point the app at the sync API
 
@@ -241,7 +244,10 @@ Save → Sync now:
 
 - **Netlify Function path (3A):** use your **Netlify site URL**, e.g.
   `https://your-site.netlify.app`
-- **Edge Function path (3B):** use `https://<project-ref>.functions.supabase.co/api`
+- **Edge Function path (3B):** use the domain **without** `/api` —
+  `https://<project-ref>.functions.supabase.co` (the app adds `/api/sync`
+  itself; including `/api` here would double it to `/api/api/sync`). This assumes
+  the function is named `api`.
 
 Each register now pushes sales/stock and pulls catalogue/tenant/staff changes
 from Supabase. (`/api/sync` and `/api/pull` are appended by the app.)
