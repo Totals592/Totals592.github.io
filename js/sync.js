@@ -163,7 +163,7 @@ window.Sync = (function () {
       DB.persistNow();
       emit({ state: 'synced', pending: pendingCount(), at: DB.getSetting('last_sync_at') });
     } catch (e) {
-      emit({ state: 'error', pending: pendingCount(), error: e.message });
+      emit({ state: 'error', pending: pendingCount(), error: e && e.message });
     } finally {
       running = false;
     }

@@ -220,9 +220,12 @@ window.DB = (function () {
       return o;
     });
   }
-  function all(sql, params = []) { return rowsFromResult(db.exec(sql, params)); }
+  // sql.js rejects `undefined` binds (throwing a bare string), so coerce any
+  // undefined parameter to null. Makes sync robust to server rows missing a field.
+  function clean(params) { return (params || []).map((p) => (p === undefined ? null : p)); }
+  function all(sql, params = []) { return rowsFromResult(db.exec(sql, clean(params))); }
   function get(sql, params = []) { const r = all(sql, params); return r[0] || null; }
-  function run(sql, params = []) { db.run(sql, params); schedulePersist(); }
+  function run(sql, params = []) { db.run(sql, clean(params)); schedulePersist(); }
 
   function uid(prefix) {
     const base = (crypto.randomUUID ? crypto.randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2)));

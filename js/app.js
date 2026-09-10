@@ -1125,6 +1125,9 @@
     $('#loginPin').value = '';
     $('#loginBack').classList.add('open');
     setTimeout(() => $('#loginUser').focus(), 50);
+    // Proactively pull shops/staff so a fresh device knows about them by the
+    // time someone signs in.
+    if (Sync.configured() && navigator.onLine) Sync.run(true);
   }
   function hideLogin() { $('#loginBack').classList.remove('open'); }
 
@@ -1133,10 +1136,27 @@
     const user = $('#loginUser').value.trim().toLowerCase();
     const pin = $('#loginPin').value;
     const err = $('#loginErr');
+    const btn = $('#loginBtn');
     if (!shop.trim()) { err.textContent = 'Enter your shop name.'; return; }
     if (!user || !pin) { err.textContent = 'Enter your username and PIN.'; return; }
-    const tenant = findTenantByName(shop);
-    if (!tenant) { err.textContent = 'Shop not found on this device. Check the name, or sync first.'; return; }
+
+    let tenant = findTenantByName(shop);
+    // First login on a fresh device: the shop hasn't synced down yet — fetch
+    // from the cloud on demand, then look again.
+    if (!tenant && Sync.configured() && navigator.onLine) {
+      err.style.color = 'var(--muted)'; err.textContent = 'Fetching your shop from the cloud…';
+      btn.disabled = true;
+      try { await Sync.run(true); } catch (e) {}
+      btn.disabled = false; err.style.color = '';
+      tenant = findTenantByName(shop);
+    }
+    if (!tenant) {
+      err.style.color = '';
+      err.textContent = Sync.configured()
+        ? 'Shop not found. Check the exact name, and make sure this device is online.'
+        : 'Shop not found on this device, and cloud sync is off.';
+      return;
+    }
     const staff = DB.get('SELECT * FROM staff WHERE tenant_id = ? AND lower(username) = ? AND active = 1', [tenant.id, user]);
     if (!staff) { err.textContent = 'Unknown user for this shop.'; return; }
     const hash = await Config.hashPin(pin, staff.salt);
@@ -1609,6 +1629,19 @@
     $('#saveApiBtn').addEventListener('click', () => {
       DB.setSetting('api_base', $('#setApiBase').value.trim()); DB.persistNow();
       updateSyncPill(); Sync.run(true); toast('Cloud settings saved', 'ok');
+    });
+    // Reset to the embedded default (removes the per-device override).
+    $('#resetApiBtn').addEventListener('click', () => {
+      DB.run('DELETE FROM settings WHERE key = ?', ['api_base']); DB.persistNow();
+      $('#setApiBase').value = Config.DEFAULT_API_BASE;
+      updateSyncPill(); Sync.run(true); toast('Reset to default cloud address', 'ok');
+    });
+    // Turn cloud off for this device (explicit empty = offline).
+    $('#offlineApiBtn').addEventListener('click', () => {
+      if (!confirm('Run this register OFFLINE? It will stop syncing to the cloud until you set the address again.')) return;
+      DB.setSetting('api_base', ''); DB.persistNow();
+      $('#setApiBase').value = '';
+      updateSyncPill(); toast('Cloud sync turned off (offline)', 'ok');
     });
     $('#testCloudBtn').addEventListener('click', async () => {
       const el = $('#cloudTestResult');

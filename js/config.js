@@ -48,7 +48,7 @@ window.Config = (function () {
   // Your cloud sync endpoint, baked in so every device auto-connects. New
   // installs use this automatically; an admin can override or clear it (an
   // explicit empty value = run offline) in Admin → Cloud sync.
-  const DEFAULT_API_BASE = 'https://REPLACE-WITH-YOUR-REF.functions.supabase.co';
+  const DEFAULT_API_BASE = 'https://wisnnbbodcertkaebojo.functions.supabase.co';
 
   function apiBase() {
     const s = DB.getSetting('api_base'); // null = never set → use default; '' = admin turned it off
