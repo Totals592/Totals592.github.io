@@ -185,13 +185,17 @@
             </div>
             <div class="card">
               <h3>Cloud sync</h3>
-              <p class="muted">Leave the API base URL empty to run as a standalone offline register. Point it at your deployed backend (see <code>server/</code>) to sync sales, stock and receive remote updates. Changes here queue for the cloud and reach every register automatically once online.</p>
+              <p class="muted">This device is pre-configured to your cloud, so it works out of the box. You can edit the address, reset it to the built-in default, or turn it off to run this register fully offline. These controls are admin-only.</p>
               <label>Cloud API base URL</label>
               <input id="setApiBase" placeholder="https://your-backend.example.com">
               <div class="toolbar" style="margin-top:12px">
                 <button class="btn brand" id="saveApiBtn">Save</button>
                 <button class="btn" id="testCloudBtn">Test connection</button>
                 <button class="btn" id="syncNowBtn">Sync now</button>
+              </div>
+              <div class="toolbar">
+                <button class="btn" id="resetApiBtn">Reset to default</button>
+                <button class="btn danger" id="offlineApiBtn">Turn off (offline)</button>
                 <span class="pill"><span class="dot" id="syncDot2"></span><span id="lastSync">—</span></span>
               </div>
               <p class="hint" id="cloudTestResult"></p>
