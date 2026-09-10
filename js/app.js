@@ -46,7 +46,7 @@
       cart.push({
         variation_id: v.id, product_id: p.id,
         name: p.name + (v.name && v.name !== 'Default' ? ' · ' + v.name : ''),
-        sku: v.sku, unit_price: v.price, qty: 1,
+        sku: v.sku, unit_price: Config.effectivePrice(v), qty: 1,
         track_stock: !!v.track_stock, stock: v.stock
       });
     }
@@ -143,9 +143,11 @@
     const shown = prods.filter((p) => activeCat === 'All' || p.category === activeCat);
     $('#tiles').innerHTML = shown.map((p) => {
       const v = p.variations[0];
+      const eff = (x) => Config.effectivePrice(x);
       const priceLabel = p.variations.length > 1
-        ? 'from ' + money(Math.min(...p.variations.map((x) => x.price)))
-        : money(v.price);
+        ? 'from ' + money(Math.min(...p.variations.map(eff)))
+        : money(eff(v));
+      const dealt = p.variations.some((x) => Config.hasDiscount(x));
       const stock = p.variations.reduce((s, x) => s + (x.track_stock ? x.stock : Infinity), 0);
       const tracked = p.variations.some((x) => x.track_stock);
       const low = tracked && stock <= Math.max(...p.variations.map((x) => x.low_stock_threshold || 0));
@@ -154,6 +156,7 @@
         <span class="swatch" style="background:${esc(p.color || '#334155')}"></span>
         ${p.image ? `<span class="img" style="background-image:url('${esc(p.image)}')"></span>` : ''}
         ${low ? `<span class="low">${out ? 'Out' : 'Low: ' + stock}</span>` : ''}
+        ${dealt ? '<span class="deal">DEAL</span>' : ''}
         <span class="name">${esc(p.name)}</span>
         <span class="price">${priceLabel}</span>
       </button>`;
@@ -171,9 +174,13 @@
         <div class="tiles">
           ${vars.map((v) => {
             const out = v.track_stock && v.stock <= 0;
+            const eff = Config.effectivePrice(v);
+            const priceHtml = Config.hasDiscount(v)
+              ? `<span class="price">${money(eff)} <span class="was">${money(v.price)}</span></span>`
+              : `<span class="price">${money(eff)}</span>`;
             return `<button class="tile ${out ? 'out' : ''}" data-var="${v.id}" ${out ? 'disabled' : ''}>
               <span class="name">${esc(v.name)}</span>
-              <span class="price">${money(v.price)}</span>
+              ${priceHtml}
               ${v.track_stock ? `<span class="s muted">${v.stock} in stock</span>` : ''}
             </button>`;
           }).join('')}
@@ -504,6 +511,12 @@
             <option value="">—</option>
             ${suppliers.map((s) => `<option value="${s.id}" ${s.id === v.supplier_id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}
           </select></div>
+          <div><label>Discount</label><select data-v="discount_type">
+            <option value="none" ${(!v.discount_type || v.discount_type === 'none') ? 'selected' : ''}>No discount</option>
+            <option value="percent" ${v.discount_type === 'percent' ? 'selected' : ''}>% off</option>
+            <option value="amount" ${v.discount_type === 'amount' ? 'selected' : ''}>Amount off</option>
+          </select></div>
+          <div><label>Discount value</label><input data-v="discount_value" type="number" step="0.01" min="0" value="${v.discount_value || 0}"></div>
           <div><label>Track stock</label><select data-v="track_stock">
             <option value="1" ${v.track_stock ? 'selected' : ''}>Yes</option>
             <option value="0" ${!v.track_stock ? 'selected' : ''}>No (service)</option>
@@ -604,7 +617,9 @@
           price: parseFloat(g('price')) || 0, cost: parseFloat(g('cost')) || 0,
           stock: parseFloat(g('stock')) || 0, track_stock: g('track_stock') === '1' ? 1 : 0,
           low_stock_threshold: parseFloat(g('low_stock_threshold')) || 0,
-          supplier_id: g('supplier_id') || null, active: 1
+          supplier_id: g('supplier_id') || null,
+          discount_type: g('discount_type') || 'none', discount_value: parseFloat(g('discount_value')) || 0,
+          active: 1
         };
       });
     }
@@ -641,14 +656,14 @@
       const keptIds = [];
       collected.forEach((v) => {
         if (v.id) {
-          DB.run(`UPDATE variations SET name=?,sku=?,barcode=?,price=?,cost=?,stock=?,track_stock=?,low_stock_threshold=?,supplier_id=?,active=1,updated_at=? WHERE id=?`,
-            [v.name, v.sku, v.barcode, v.price, v.cost, v.stock, v.track_stock, v.low_stock_threshold, v.supplier_id, now, v.id]);
+          DB.run(`UPDATE variations SET name=?,sku=?,barcode=?,price=?,cost=?,stock=?,track_stock=?,low_stock_threshold=?,supplier_id=?,discount_type=?,discount_value=?,active=1,updated_at=? WHERE id=?`,
+            [v.name, v.sku, v.barcode, v.price, v.cost, v.stock, v.track_stock, v.low_stock_threshold, v.supplier_id, v.discount_type, v.discount_value, now, v.id]);
           keptIds.push(v.id);
         } else {
           const vid = DB.uid('var');
-          DB.run(`INSERT INTO variations(id,product_id,tenant_id,name,sku,barcode,price,cost,stock,track_stock,low_stock_threshold,supplier_id,active,updated_at,created_at)
-                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-            [vid, productId, tid, v.name, v.sku, v.barcode, v.price, v.cost, v.stock, v.track_stock, v.low_stock_threshold, v.supplier_id, 1, now, now]);
+          DB.run(`INSERT INTO variations(id,product_id,tenant_id,name,sku,barcode,price,cost,stock,track_stock,low_stock_threshold,supplier_id,discount_type,discount_value,active,updated_at,created_at)
+                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            [vid, productId, tid, v.name, v.sku, v.barcode, v.price, v.cost, v.stock, v.track_stock, v.low_stock_threshold, v.supplier_id, v.discount_type, v.discount_value, 1, now, now]);
           keptIds.push(vid);
         }
       });
@@ -737,29 +752,60 @@
 
   /* ---------------- Reports ---------------- */
   let repShowFigures = false; // sales/income hidden by default each visit
+  let repFrom = '', repTo = '', repSearch = ''; // report filters
   function renderReports() {
     const tid = Config.activeTenantId();
     const today = new Date(); today.setHours(0, 0, 0, 0);
-    const sales = DB.all('SELECT * FROM sales WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 100', [tid]);
+    const allSales = DB.all('SELECT * FROM sales WHERE tenant_id = ? ORDER BY created_at DESC', [tid]);
     const isVoid = (s) => (s.status || 'completed') === 'voided';
-    // Voided sales are excluded from all money figures.
-    const todaySales = sales.filter((s) => new Date(s.created_at) >= today && !isVoid(s));
-    const todayTotal = todaySales.reduce((s, r) => s + r.total, 0);
     const pending = DB.get('SELECT COUNT(*) AS n FROM sales WHERE tenant_id=? AND synced=0', [tid]);
+
+    // Reflect current filter values into the inputs.
+    $('#repFrom').value = repFrom; $('#repTo').value = repTo; $('#repSearch').value = repSearch;
+    const from = repFrom ? new Date(repFrom + 'T00:00:00') : null;
+    const to = repTo ? new Date(repTo + 'T23:59:59.999') : null;
+    const q = repSearch.trim().toLowerCase();
+    const inFilter = (s) => {
+      const d = new Date(s.created_at);
+      if (from && d < from) return false;
+      if (to && d > to) return false;
+      if (q) {
+        const hay = (s.receipt_no || '').toLowerCase() + ' ' + (s.created_at || '').slice(0, 10) +
+          ' ' + (s.order_no != null ? 'order #' + s.order_no : '');
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    };
+    const filterActive = !!(from || to || q);
+    const filtered = allSales.filter(inFilter);
+    const display = filterActive ? filtered : allSales.slice(0, 100);
+
+    // KPIs reflect the selected range when a filter is active, else today.
+    const kpiSet = (filterActive ? filtered : allSales.filter((s) => new Date(s.created_at) >= today))
+      .filter((s) => !isVoid(s));
+    const lbl = filterActive ? 'Selected' : 'Today';
 
     // Money figures are masked until the manager explicitly reveals them.
     $('#repShowFigures').checked = repShowFigures;
     $('#repPrivacyHint').textContent = repShowFigures ? 'Figures are visible.' : 'Figures are hidden by default for privacy.';
     const cash = (v) => repShowFigures ? money(v) : '••••••';
 
+    // Report Analytics is a tier feature: the button stays inert until an admin
+    // enables it for this shop.
+    const tnt = Config.activeTenant() || {};
+    const analyticsOn = tnt.analytics_enabled === 1;
+    const ab = $('#repAnalyticsBtn');
+    if (ab) { ab.disabled = !analyticsOn; ab.classList.toggle('brand', analyticsOn); ab.classList.toggle('ghost', !analyticsOn);
+      ab.textContent = analyticsOn ? '📈 Report Analytics' : '📈 Report Analytics (off)'; }
+
     $('#repKpis').innerHTML =
-      kpi(cash(todayTotal), "Today's sales") +
-      kpi(todaySales.length, 'Transactions today') +
-      kpi(cash(todaySales.reduce((s, r) => s + r.vat_amount, 0)), 'VAT collected today') +
+      kpi(cash(kpiSet.reduce((a, r) => a + r.total, 0)), lbl + ' sales') +
+      kpi(kpiSet.length, 'Transactions (' + lbl.toLowerCase() + ')') +
+      kpi(cash(kpiSet.reduce((a, r) => a + r.vat_amount, 0)), 'VAT (' + lbl.toLowerCase() + ')') +
       kpi(pending ? pending.n : 0, 'Unsynced sales');
 
     const canEdit = canManage();
-    $('#salesTable tbody').innerHTML = sales.map((s) => {
+    $('#salesTable tbody').innerHTML = display.map((s) => {
       const voided = isVoid(s);
       const actions = voided
         ? `<button class="btn small" data-reprint="${s.id}">Receipt</button>`
@@ -773,7 +819,7 @@
         <td>${s.synced ? '<span class="badge ok">Synced</span>' : '<span class="badge">Pending</span>'}</td>
         <td><div class="row-actions">${actions}</div></td>
       </tr>`;
-    }).join('') || '<tr><td colspan="7" class="muted center">No sales yet.</td></tr>';
+    }).join('') || `<tr><td colspan="7" class="muted center">${filterActive ? 'No sales match the filter.' : 'No sales yet.'}</td></tr>`;
 
     const low = DB.all(`
       SELECT v.*, p.name AS pname, s.name AS supplier_name FROM variations v
@@ -791,6 +837,62 @@
     const items = DB.all('SELECT * FROM sale_items WHERE sale_id = ?', [saleId]);
     const t = DB.get('SELECT * FROM tenants WHERE id = ?', [s.tenant_id]);
     Receipt.print(s, items, t);
+  }
+
+  // Report Analytics (tier feature): a compact insights panel — last 7 days
+  // trend, top products and payment mix. Only reachable when admin-enabled.
+  function openAnalytics() {
+    const tid = Config.activeTenantId();
+    const since = new Date(Date.now() - 29 * 864e5); // last 30 days
+    const sales = DB.all('SELECT * FROM sales WHERE tenant_id=? ORDER BY created_at DESC', [tid])
+      .filter((s) => (s.status || 'completed') !== 'voided' && new Date(s.created_at) >= since);
+    const items = DB.all(`SELECT si.* FROM sale_items si JOIN sales s ON s.id=si.sale_id
+      WHERE si.tenant_id=? AND (s.status IS NULL OR s.status='completed') AND s.created_at >= ?`, [tid, since.toISOString()]);
+
+    const total = sales.reduce((a, s) => a + s.total, 0);
+    const count = sales.length;
+    const avg = count ? total / count : 0;
+
+    // Daily totals for the last 7 days (simple inline bars).
+    const days = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - i);
+      const key = Config.todayKey(d);
+      const dayTotal = sales.filter((s) => (s.created_at || '').slice(0, 10) === key).reduce((a, s) => a + s.total, 0);
+      days.push({ key, label: d.toLocaleDateString(undefined, { weekday: 'short' }), total: dayTotal });
+    }
+    const maxDay = Math.max(1, ...days.map((d) => d.total));
+
+    // Top products by revenue.
+    const byProduct = {};
+    items.forEach((it) => {
+      const k = it.name || 'Item';
+      byProduct[k] = byProduct[k] || { qty: 0, revenue: 0 };
+      byProduct[k].qty += Number(it.qty) || 0;
+      byProduct[k].revenue += Number(it.line_total) || 0;
+    });
+    const top = Object.entries(byProduct).sort((a, b) => b[1].revenue - a[1].revenue).slice(0, 8);
+
+    openModal(`
+      <header><h3>📈 Report Analytics · last 30 days</h3><button class="x" data-close>×</button></header>
+      <div class="body">
+        <div class="kpis">
+          ${kpi(money(total), 'Revenue (30d)')}
+          ${kpi(count, 'Transactions')}
+          ${kpi(money(avg), 'Average sale')}
+        </div>
+        <h3 style="margin:14px 0 6px">Last 7 days</h3>
+        <div class="bars">
+          ${days.map((d) => `<div class="bar"><span class="barfill" style="height:${Math.round((d.total / maxDay) * 100)}%"></span>
+            <span class="barlbl">${d.label}</span></div>`).join('')}
+        </div>
+        <h3 style="margin:16px 0 6px">Top products</h3>
+        <div class="table-wrap"><table class="data"><thead><tr><th>Product</th><th>Qty</th><th>Revenue</th></tr></thead>
+          <tbody>${top.map(([n, v]) => `<tr><td>${esc(n)}</td><td>${v.qty}</td><td>${money(v.revenue)}</td></tr>`).join('')
+            || '<tr><td colspan="3" class="muted center">No sales in the last 30 days.</td></tr>'}</tbody></table></div>
+      </div>
+      <div class="foot"><button class="btn ghost" data-close>Close</button></div>`, true);
+    $$('[data-close]', $('#modal')).forEach((b) => b.addEventListener('click', closeModal));
   }
 
   // Void a sale: mark it voided, return its items to stock, and sync. Kept in
@@ -852,7 +954,9 @@
     $('#adminPanel').style.display = unlocked ? '' : 'none';
     if (!unlocked) return;
     // Cloud + admin details live here, behind the admin password.
-    $('#setApiBase').value = DB.getSetting('api_base') || '';
+    // Show the effective cloud URL: the admin's override, or the embedded default.
+    const storedApi = DB.getSetting('api_base');
+    $('#setApiBase').value = (storedApi === null || storedApi === undefined) ? Config.DEFAULT_API_BASE : storedApi;
     updateSyncPill();
     const q = tenantFilter.toLowerCase();
     const rows = DB.all('SELECT * FROM tenants ORDER BY name').filter((t) =>
@@ -903,6 +1007,7 @@
           </select></div>
         </div>
         <label>Receipt footer message</label><input id="tFooter" value="${esc(t.receipt_footer || '')}">
+        <label class="switch" style="margin-top:10px"><input type="checkbox" id="tAnalytics" ${t.analytics_enabled === 1 ? 'checked' : ''}> Enable Report Analytics (paid tier)</label>
       </div>
       <div class="foot"><button class="btn ghost" data-close>Cancel</button><button class="btn brand" id="tSave">Save</button></div>`, true);
     const m = $('#modal');
@@ -916,17 +1021,18 @@
         phone: $('#tPhone', m).value.trim(), email: $('#tEmail', m).value.trim(),
         address: $('#tAddr', m).value.trim(), currency: $('#tCur', m).value,
         vat_rate: parseFloat($('#tVat', m).value) || 0, vat_inclusive: parseInt($('#tVatInc', m).value, 10),
-        status: $('#tStatus', m).value, receipt_footer: $('#tFooter', m).value.trim()
+        status: $('#tStatus', m).value, receipt_footer: $('#tFooter', m).value.trim(),
+        analytics_enabled: $('#tAnalytics', m).checked ? 1 : 0
       };
       let id = tid;
       if (editing) {
-        DB.run(`UPDATE tenants SET name=?,tin=?,slug=?,phone=?,email=?,address=?,currency=?,vat_rate=?,vat_inclusive=?,status=?,receipt_footer=?,updated_at=? WHERE id=?`,
-          [vals.name, vals.tin, vals.slug, vals.phone, vals.email, vals.address, vals.currency, vals.vat_rate, vals.vat_inclusive, vals.status, vals.receipt_footer, now, tid]);
+        DB.run(`UPDATE tenants SET name=?,tin=?,slug=?,phone=?,email=?,address=?,currency=?,vat_rate=?,vat_inclusive=?,status=?,receipt_footer=?,analytics_enabled=?,updated_at=? WHERE id=?`,
+          [vals.name, vals.tin, vals.slug, vals.phone, vals.email, vals.address, vals.currency, vals.vat_rate, vals.vat_inclusive, vals.status, vals.receipt_footer, vals.analytics_enabled, now, tid]);
       } else {
         id = DB.uid('ten');
-        DB.run(`INSERT INTO tenants(id,name,tin,slug,phone,email,address,currency,vat_rate,vat_inclusive,status,receipt_footer,updated_at,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [id, vals.name, vals.tin, vals.slug, vals.phone, vals.email, vals.address, vals.currency, vals.vat_rate, vals.vat_inclusive, vals.status, vals.receipt_footer, now, now]);
+        DB.run(`INSERT INTO tenants(id,name,tin,slug,phone,email,address,currency,vat_rate,vat_inclusive,status,receipt_footer,analytics_enabled,updated_at,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [id, vals.name, vals.tin, vals.slug, vals.phone, vals.email, vals.address, vals.currency, vals.vat_rate, vals.vat_inclusive, vals.status, vals.receipt_footer, vals.analytics_enabled, now, now]);
         // Give a brand-new shop a default manager login (change the PIN after).
         await createStaff(id, { name: 'Manager', username: 'manager', pin: '1234', role: 'manager' });
       }
@@ -1103,7 +1209,8 @@
       <td>${r.active ? '<span class="badge ok">Active</span>' : '<span class="badge">Disabled</span>'}</td>
       <td><div class="row-actions">
         <button class="btn small" data-editstaff="${r.id}">Edit</button>
-        <button class="btn small danger" data-delstaff="${r.id}">${r.active ? 'Disable' : 'Enable'}</button>
+        <button class="btn small" data-delstaff="${r.id}">${r.active ? 'Disable' : 'Enable'}</button>
+        <button class="btn small danger" data-removestaff="${r.id}">Delete</button>
       </div></td>
     </tr>`).join('') || '<tr><td colspan="5" class="muted center">No staff yet.</td></tr>';
     body.dataset.tenant = tid;
@@ -1170,6 +1277,24 @@
     if (after) after(); else renderStaff(s.tenant_id);
   }
 
+  // Permanently delete a staff member. Removes them locally and tells the cloud
+  // (and other registers) to deactivate the account, so they can no longer log in.
+  function deleteStaff(staffId, after) {
+    const s = DB.get('SELECT * FROM staff WHERE id = ?', [staffId]);
+    if (!s) return;
+    if (s.active && s.role === 'manager') {
+      const mgrs = DB.get("SELECT COUNT(*) AS n FROM staff WHERE tenant_id=? AND role='manager' AND active=1", [s.tenant_id]);
+      if (mgrs && mgrs.n <= 1) { toast('Keep at least one active manager', 'err'); return; }
+    }
+    if (!confirm('Permanently delete ' + s.name + '? They will no longer be able to sign in.')) return;
+    const now = DB.nowISO();
+    DB.run('DELETE FROM staff WHERE id = ?', [staffId]);
+    Sync.queue('staff', staffId, 'update', { id: staffId, tenant_id: s.tenant_id, active: 0, updated_at: now }, s.tenant_id);
+    DB.persistNow();
+    if (after) after(); else renderStaff(s.tenant_id);
+    toast('Staff member deleted', 'ok');
+  }
+
   // Admin-side staff manager: a self-contained modal for any tenant.
   function adminStaffModal(tenantId) {
     const t = DB.get('SELECT * FROM tenants WHERE id = ?', [tenantId]);
@@ -1185,7 +1310,8 @@
           <td>${r.active ? '<span class="badge ok">Active</span>' : '<span class="badge">Disabled</span>'}</td>
           <td><div class="row-actions">
             <button class="btn small" data-astaffedit="${r.id}">Edit</button>
-            <button class="btn small danger" data-astafftog="${r.id}">${r.active ? 'Disable' : 'Enable'}</button>
+            <button class="btn small" data-astafftog="${r.id}">${r.active ? 'Disable' : 'Enable'}</button>
+            <button class="btn small danger" data-astaffdel="${r.id}">Delete</button>
           </div></td></tr>`).join('') || '<tr><td colspan="5" class="muted center">No staff yet.</td></tr>'}
         </tbody></table></div>
       </div>
@@ -1195,6 +1321,7 @@
     $('#aAddStaff', m).addEventListener('click', () => staffModal(tenantId, null, rerender));
     $$('[data-astaffedit]', m).forEach((b) => b.addEventListener('click', () => staffModal(tenantId, b.dataset.astaffedit, rerender)));
     $$('[data-astafftog]', m).forEach((b) => b.addEventListener('click', () => toggleStaff(b.dataset.astafftog, rerender)));
+    $$('[data-astaffdel]', m).forEach((b) => b.addEventListener('click', () => deleteStaff(b.dataset.astaffdel, rerender)));
   }
 
   /* ---------------- Status pills ---------------- */
@@ -1275,7 +1402,7 @@
     $$('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + name));
     if (name === 'inventory') renderInventory();
     if (name === 'suppliers') renderSuppliers();
-    if (name === 'reports') { repShowFigures = false; renderReports(); }
+    if (name === 'reports') { repShowFigures = false; repFrom = repTo = repSearch = ''; renderReports(); }
     if (name === 'admin') renderAdmin();
     if (name === 'settings') loadSettings();
   }
@@ -1294,6 +1421,7 @@
     $('#setSvcShow').checked = t.service_charge_show_receipt !== 0;
     $('#logoPrev').src = t.logo || './icons/icon.svg';
     $('#setLogoOnReceipt').checked = t.logo_on_receipt !== 0;
+    $('#setOrderNoOnReceipt').checked = t.order_no_on_receipt !== 0;
     let cats = []; try { cats = JSON.parse(t.categories || '[]'); } catch (e) {}
     $('#setCategories').value = cats.join('\n');
     renderStaff();
@@ -1355,6 +1483,15 @@
 
     // Reports
     $('#repShowFigures').addEventListener('change', (e) => { repShowFigures = e.target.checked; renderReports(); });
+    $('#repFrom').addEventListener('change', (e) => { repFrom = e.target.value; renderReports(); });
+    $('#repTo').addEventListener('change', (e) => { repTo = e.target.value; renderReports(); });
+    $('#repSearch').addEventListener('input', (e) => { repSearch = e.target.value; renderReports(); });
+    $('#repClearFilter').addEventListener('click', () => { repFrom = repTo = repSearch = ''; renderReports(); });
+    $('#repAnalyticsBtn').addEventListener('click', () => {
+      const t = Config.activeTenant();
+      if (!t || t.analytics_enabled !== 1) { toast('Report analytics is off — an administrator enables it per shop.', 'err'); return; }
+      openAnalytics();
+    });
     $('#salesTable').addEventListener('click', (e) => {
       const rp = e.target.closest('[data-reprint]'); if (rp) return reprint(rp.dataset.reprint);
       const ed = e.target.closest('[data-editsale]'); if (ed) return editSale(ed.dataset.editsale);
@@ -1399,9 +1536,12 @@
     // Settings — staff (manager-managed, current shop)
     $('#addStaffBtn').addEventListener('click', () => staffModal(Config.activeTenantId(), null, () => renderStaff()));
     $('#staffTable').addEventListener('click', (e) => {
-      const ed = e.target.closest('[data-editstaff]'); const del = e.target.closest('[data-delstaff]');
+      const ed = e.target.closest('[data-editstaff]');
+      const del = e.target.closest('[data-delstaff]');
+      const rem = e.target.closest('[data-removestaff]');
       if (ed) staffModal(Config.activeTenantId(), ed.dataset.editstaff, () => renderStaff());
       if (del) toggleStaff(del.dataset.delstaff, () => renderStaff());
+      if (rem) deleteStaff(rem.dataset.removestaff, () => renderStaff());
     });
 
     // Settings — sales / VAT / service charge
@@ -1433,9 +1573,10 @@
     $('#logoFile').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) saveLogo(f); e.target.value = ''; });
     $('#saveBrandingBtn').addEventListener('click', () => {
       const t = Config.activeTenant(); const now = DB.nowISO();
-      const on = $('#setLogoOnReceipt').checked ? 1 : 0;
-      DB.run('UPDATE tenants SET logo_on_receipt=?, updated_at=? WHERE id=?', [on, now, t.id]);
-      Sync.queue('tenant', t.id, 'update', { id: t.id, logo_on_receipt: on, updated_at: now }, t.id);
+      const logoOn = $('#setLogoOnReceipt').checked ? 1 : 0;
+      const orderOn = $('#setOrderNoOnReceipt').checked ? 1 : 0;
+      DB.run('UPDATE tenants SET logo_on_receipt=?, order_no_on_receipt=?, updated_at=? WHERE id=?', [logoOn, orderOn, now, t.id]);
+      Sync.queue('tenant', t.id, 'update', { id: t.id, logo_on_receipt: logoOn, order_no_on_receipt: orderOn, updated_at: now }, t.id);
       DB.persistNow(); toast('Branding saved', 'ok');
     });
 

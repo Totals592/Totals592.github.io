@@ -45,10 +45,34 @@ window.Config = (function () {
   }
   function setActiveTenant(id) { DB.setSetting('active_tenant_id', id); }
 
-  function apiBase() { return (DB.getSetting('api_base') || '').replace(/\/+$/, ''); }
+  // Your cloud sync endpoint, baked in so every device auto-connects. New
+  // installs use this automatically; an admin can override or clear it (an
+  // explicit empty value = run offline) in Admin → Cloud sync.
+  const DEFAULT_API_BASE = 'https://REPLACE-WITH-YOUR-REF.functions.supabase.co';
+
+  function apiBase() {
+    const s = DB.getSetting('api_base'); // null = never set → use default; '' = admin turned it off
+    let base = (s === null || s === undefined) ? DEFAULT_API_BASE : s;
+    // The default is a placeholder until baked with the real URL — ignore it.
+    if (base && base.indexOf('REPLACE-WITH-YOUR-REF') !== -1) base = '';
+    return (base || '').replace(/\/+$/, '');
+  }
   function deviceName() { return DB.getSetting('device_name') || 'Register 1'; }
   function cashierName() { return DB.getSetting('cashier_name') || 'Cashier'; }
   function adminPin() { return DB.getSetting('admin_pin') || '1234'; }
+
+  // Effective selling price after any per-item discount set in inventory.
+  function effectivePrice(v) {
+    const p = Number(v.price) || 0;
+    const dv = Number(v.discount_value) || 0;
+    let out = p;
+    if (v.discount_type === 'percent' && dv > 0) out = p * (1 - dv / 100);
+    else if (v.discount_type === 'amount' && dv > 0) out = p - dv;
+    return Math.max(0, Math.round(out * 100) / 100);
+  }
+  function hasDiscount(v) {
+    return (v.discount_type === 'percent' || v.discount_type === 'amount') && Number(v.discount_value) > 0;
+  }
 
   /* Next receipt number, per tenant, e.g. RCT-000042 -------------------------*/
   function nextReceiptNo(tenantId, slug) {
@@ -116,6 +140,7 @@ window.Config = (function () {
     CURRENCY_SYMBOLS, money, vatBreakdown,
     activeTenantId, activeTenant, setActiveTenant,
     apiBase, deviceName, cashierName: cashierNameResolved, adminPin,
+    DEFAULT_API_BASE, effectivePrice, hasDiscount,
     nextReceiptNo, nextOrderNo, todayKey, escapeHtml,
     randomSalt, hashPin, currentSession, setSession, currentRole
   };

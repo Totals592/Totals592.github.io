@@ -61,6 +61,8 @@ create table if not exists tenants (
   service_charge_rate numeric default 0,
   service_charge_show_receipt int default 1,
   logo_on_receipt int default 1,
+  order_no_on_receipt int default 1,
+  analytics_enabled int default 0,
   categories text,
   receipt_footer text,
   logo text,
@@ -89,7 +91,8 @@ create table if not exists variations (
   name text default 'Default', sku text, barcode text,
   price numeric not null default 0, cost numeric default 0, stock numeric default 0,
   track_stock int default 1, low_stock_threshold numeric default 5,
-  supplier_id text, active int default 1,
+  supplier_id text, discount_type text default 'none', discount_value numeric default 0,
+  active int default 1,
   updated_at timestamptz, created_at timestamptz, seq bigserial
 );
 
