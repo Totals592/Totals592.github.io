@@ -82,6 +82,8 @@ window.DB = (function () {
     service_charge_rate REAL DEFAULT 0,
     service_charge_show_receipt INTEGER DEFAULT 1,
     logo_on_receipt INTEGER DEFAULT 1,
+    order_no_on_receipt INTEGER DEFAULT 1,
+    analytics_enabled INTEGER DEFAULT 0,
     categories TEXT,
     receipt_footer TEXT,
     logo TEXT,
@@ -130,6 +132,8 @@ window.DB = (function () {
     track_stock INTEGER DEFAULT 1,
     low_stock_threshold REAL DEFAULT 5,
     supplier_id TEXT,
+    discount_type TEXT DEFAULT 'none',
+    discount_value REAL DEFAULT 0,
     active INTEGER DEFAULT 1,
     updated_at TEXT,
     created_at TEXT
@@ -321,6 +325,10 @@ window.DB = (function () {
     ensureColumn('sales', 'order_date', 'TEXT');
     ensureColumn('tenants', 'logo_on_receipt', 'INTEGER DEFAULT 1');
     ensureColumn('tenants', 'categories', 'TEXT');
+    ensureColumn('tenants', 'order_no_on_receipt', 'INTEGER DEFAULT 1');
+    ensureColumn('tenants', 'analytics_enabled', 'INTEGER DEFAULT 0');
+    ensureColumn('variations', 'discount_type', "TEXT DEFAULT 'none'");
+    ensureColumn('variations', 'discount_value', 'REAL DEFAULT 0');
   }
 
   /* ---------- Init ---------- */

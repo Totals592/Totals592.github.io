@@ -42,7 +42,7 @@ window.Receipt = (function () {
         ${tenant.tin ? `<div class="line"><b>TIN: ${e(tenant.tin)}</b></div>` : ''}
       </div>
       <div class="rule"></div>
-      ${sale.order_no != null ? `<div class="order">ORDER #${e(sale.order_no)}</div>` : ''}
+      ${sale.order_no != null && tenant.order_no_on_receipt !== 0 ? `<div class="order">ORDER #${e(sale.order_no)}</div>` : ''}
       <div class="meta">
         <div><span>Receipt</span><span>${e(sale.receipt_no)}</span></div>
         <div><span>Date</span><span>${dt.toLocaleString()}</span></div>
