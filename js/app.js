@@ -1666,7 +1666,7 @@
       try {
         const r = await Sync.test(base);
         el.style.color = 'var(--ok)';
-        el.textContent = '✓ Connected — ' + r.tenants + ' tenant(s) on the server, cursor ' + r.cursor + '.';
+        el.textContent = '✓ Connected — ' + r.tenants + ' tenant(s) visible on the server.';
         toast('Cloud connection OK', 'ok');
       } catch (e) {
         el.style.color = 'var(--danger)';

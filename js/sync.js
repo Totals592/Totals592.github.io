@@ -252,8 +252,9 @@ window.Sync = (function () {
     if (!res.ok) throw new Error('HTTP ' + res.status + ' from server');
     let j;
     try { j = await res.json(); } catch (e) { throw new Error('Server did not return JSON (wrong URL?)'); }
-    if (!('cursor' in j)) throw new Error('Unexpected response (is this the sync API?)');
-    return { ok: true, tenants: (j.tenants || []).length, cursor: j.cursor };
+    // A valid sync API returns the entity arrays (newer builds omit `cursor`).
+    if (!Array.isArray(j.tenants) && !('cursor' in j)) throw new Error('Unexpected response (is this the sync API?)');
+    return { ok: true, tenants: (j.tenants || []).length };
   }
 
   return { start, run, test, queue, pendingCount, onChange, configured, isOnline };
