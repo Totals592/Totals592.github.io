@@ -92,16 +92,29 @@ window.Sync = (function () {
     return (rows || []).reduce((m, r) => Math.max(m, Number(r.seq) || 0), start || 0);
   }
 
-  async function pull() {
+  async function pull(deep) {
     const cur = getCursors();
-    // `since` keeps the old single-cursor backend working; the *_since params
-    // drive the new per-table backend. Whichever the server understands, the
-    // client advances cursors from the seq values on the rows it gets back.
-    const since = Math.max(cur.tenants, cur.products, cur.variations, cur.staff);
+    // Tenants and staff are tiny and login-critical, so ALWAYS fetch them in
+    // full (from seq 0). This guarantees a newly created shop or staff account
+    // shows up on every other device, even if a table cursor got ahead or the
+    // backend collapses the per-table cursors to a single one. The larger
+    // catalogue/sales tables stay incremental. A `deep` pull fetches everything
+    // from 0 (used as a login safety net when a shop can't be found).
+    const c = {
+      tenants: 0,
+      staff: 0,
+      products: deep ? 0 : cur.products,
+      variations: deep ? 0 : cur.variations,
+      sales: deep ? 0 : cur.sales,
+      sale_items: deep ? 0 : cur.sale_items
+    };
+    // `since` keeps an old single-cursor backend working; the *_since params
+    // drive the per-table backend. For a deep pull we ask for everything.
+    const since = deep ? 0 : Math.max(cur.products, cur.variations, cur.sales, cur.sale_items);
     const qs = new URLSearchParams({
       since: String(since),
-      tenants_since: cur.tenants, products_since: cur.products, variations_since: cur.variations,
-      staff_since: cur.staff, sales_since: cur.sales, sale_items_since: cur.sale_items
+      tenants_since: c.tenants, products_since: c.products, variations_since: c.variations,
+      staff_since: c.staff, sales_since: c.sales, sale_items_since: c.sale_items
     });
     const out = await apiFetch('/api/pull?' + qs.toString(), { method: 'GET' });
     (out.tenants || []).forEach(upsertTenant);
@@ -111,16 +124,31 @@ window.Sync = (function () {
     (out.sales || []).forEach(upsertSale);
     (out.sale_items || []).forEach(upsertSaleItem);
 
+    // Advance each cursor to the highest seq we've seen (never move it backward).
     const next = {
-      tenants: maxSeq(out.tenants, cur.tenants),
-      products: maxSeq(out.products, cur.products),
-      variations: maxSeq(out.variations, cur.variations),
-      staff: maxSeq(out.staff, cur.staff),
-      sales: maxSeq(out.sales, cur.sales),
-      sale_items: maxSeq(out.sale_items, cur.sale_items)
+      tenants: Math.max(cur.tenants, maxSeq(out.tenants, cur.tenants)),
+      products: Math.max(cur.products, maxSeq(out.products, cur.products)),
+      variations: Math.max(cur.variations, maxSeq(out.variations, cur.variations)),
+      staff: Math.max(cur.staff, maxSeq(out.staff, cur.staff)),
+      sales: Math.max(cur.sales, maxSeq(out.sales, cur.sales)),
+      sale_items: Math.max(cur.sale_items, maxSeq(out.sale_items, cur.sale_items))
     };
     DB.setSetting('sync_cursors', JSON.stringify(next));
     return { pulled: CURSOR_KEYS.reduce((n, k) => n + ((out[k] || []).length), 0) };
+  }
+
+  // Full refresh: pull every table from scratch. Used when a shop can't be
+  // found on login, so a device that missed something still catches up.
+  async function pullAll() {
+    if (!configured() || !isOnline()) return;
+    try {
+      await pull(true);
+      DB.setSetting('last_sync_at', DB.nowISO());
+      DB.persistNow();
+      emit({ state: 'synced', pending: pendingCount(), at: DB.getSetting('last_sync_at') });
+    } catch (e) {
+      emit({ state: 'error', pending: pendingCount(), error: e && e.message });
+    }
   }
 
   // Upserts apply "last write wins" using updated_at so remote edits win only
@@ -263,8 +291,10 @@ window.Sync = (function () {
     try { j = await res.json(); } catch (e) { throw new Error('Server did not return JSON (wrong URL?)'); }
     // A valid sync API returns the entity arrays (newer builds omit `cursor`).
     if (!Array.isArray(j.tenants) && !('cursor' in j)) throw new Error('Unexpected response (is this the sync API?)');
-    return { ok: true, tenants: (j.tenants || []).length };
+    // Count only live shops — deleted ones are kept as hidden tombstones.
+    const live = (j.tenants || []).filter((t) => (t.status || 'active') !== 'deleted');
+    return { ok: true, tenants: live.length };
   }
 
-  return { start, run, test, queue, pendingCount, onChange, configured, isOnline };
+  return { start, run, pullAll, test, queue, pendingCount, onChange, configured, isOnline };
 })();

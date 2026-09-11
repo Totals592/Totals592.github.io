@@ -1128,7 +1128,7 @@
         // Give a brand-new shop a default manager login (change the PIN after).
         await createStaff(id, { name: 'Manager', username: 'manager', pin: '1234', role: 'manager' });
       }
-      Sync.queue('tenant', id, editing ? 'update' : 'create', Object.assign({ id }, vals), id);
+      Sync.queue('tenant', id, editing ? 'update' : 'create', Object.assign({ id, updated_at: now }, vals), id);
       DB.persistNow();
       closeModal(); updateTopbar(); renderAdmin();
       toast(editing ? 'Tenant updated' : 'Tenant created — default login manager / 1234', 'ok');
@@ -1291,14 +1291,20 @@
     if (!user || !pin) { err.textContent = 'Enter your username and PIN.'; return; }
 
     let tenant = findTenantByName(shop);
-    // First login on a fresh device: the shop hasn't synced down yet — fetch
-    // from the cloud on demand, then look again.
+    // First login on a fresh device (or a shop created on another device that
+    // hasn't reached here yet): fetch from the cloud on demand, then look again.
+    // If a normal sync still doesn't find it, do a full refresh from scratch —
+    // this catches a shop the incremental cursors skipped.
     if (!tenant && Sync.configured() && navigator.onLine) {
       err.style.color = 'var(--muted)'; err.textContent = 'Fetching your shop from the cloud…';
       btn.disabled = true;
-      try { await Sync.run(true); } catch (e) {}
+      try { await Sync.run(true); tenant = findTenantByName(shop); } catch (e) {}
+      if (!tenant) {
+        err.textContent = 'Still looking — refreshing all shops…';
+        try { await Sync.pullAll(); } catch (e) {}
+        tenant = findTenantByName(shop);
+      }
       btn.disabled = false; err.style.color = '';
-      tenant = findTenantByName(shop);
     }
     if (!tenant) {
       err.style.color = '';
