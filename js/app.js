@@ -353,7 +353,10 @@
         DB.run('UPDATE variations SET stock = stock - ?, updated_at = ? WHERE id = ?', [c.qty, now, c.variation_id]);
         Sync.queue('stock', c.variation_id, 'decrement', { qty: c.qty, sale_id: saleId }, t.id);
       }
-      return { name: c.name, sku: c.sku, qty: c.qty, unit_price: c.unit_price, line_total: c.unit_price * c.qty };
+      // Include the id so the cloud stores line items with the SAME id — this
+      // prevents duplicates when the origin device pulls its own sale back.
+      return { id, tenant_id: t.id, product_id: c.product_id, variation_id: c.variation_id,
+               name: c.name, sku: c.sku, qty: c.qty, unit_price: c.unit_price, line_total: c.unit_price * c.qty };
     });
 
     const saleRow = {
