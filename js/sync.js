@@ -134,21 +134,21 @@ window.Sync = (function () {
     if (!newer(t, 'tenants')) return;
     DB.run(`INSERT INTO tenants(id,name,slug,tin,phone,email,address,currency,vat_rate,vat_inclusive,
         vat_enabled,vat_show_receipt,service_charge_enabled,service_charge_rate,service_charge_show_receipt,
-        logo_on_receipt,order_no_on_receipt,analytics_enabled,categories,receipt_footer,logo,status,updated_at,created_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        logo_on_receipt,order_no_on_receipt,analytics_enabled,remote_sales_enabled,categories,receipt_footer,logo,status,updated_at,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET name=excluded.name,slug=excluded.slug,tin=excluded.tin,phone=excluded.phone,
         email=excluded.email,address=excluded.address,currency=excluded.currency,vat_rate=excluded.vat_rate,
         vat_inclusive=excluded.vat_inclusive,vat_enabled=excluded.vat_enabled,vat_show_receipt=excluded.vat_show_receipt,
         service_charge_enabled=excluded.service_charge_enabled,service_charge_rate=excluded.service_charge_rate,
         service_charge_show_receipt=excluded.service_charge_show_receipt,
         logo_on_receipt=excluded.logo_on_receipt,order_no_on_receipt=excluded.order_no_on_receipt,
-        analytics_enabled=excluded.analytics_enabled,categories=excluded.categories,
-        receipt_footer=excluded.receipt_footer,logo=excluded.logo,
+        analytics_enabled=excluded.analytics_enabled,remote_sales_enabled=excluded.remote_sales_enabled,
+        categories=excluded.categories,receipt_footer=excluded.receipt_footer,logo=excluded.logo,
         status=excluded.status,updated_at=excluded.updated_at`,
       [t.id, t.name, t.slug, t.tin, t.phone, t.email, t.address, t.currency || 'GYD',
        t.vat_rate ?? 15, t.vat_inclusive ?? 1, t.vat_enabled ?? 1, t.vat_show_receipt ?? 1,
        t.service_charge_enabled ?? 0, t.service_charge_rate ?? 0, t.service_charge_show_receipt ?? 1,
-       t.logo_on_receipt ?? 1, t.order_no_on_receipt ?? 1, t.analytics_enabled ?? 0,
+       t.logo_on_receipt ?? 1, t.order_no_on_receipt ?? 1, t.analytics_enabled ?? 0, t.remote_sales_enabled ?? 1,
        t.categories ?? null, t.receipt_footer, t.logo, t.status || 'active',
        t.updated_at || DB.nowISO(), t.created_at || DB.nowISO()]);
   }
@@ -187,16 +187,17 @@ window.Sync = (function () {
   function upsertSale(s) {
     DB.run(`INSERT INTO sales(id,tenant_id,receipt_no,order_no,order_date,subtotal,vat_amount,total,
         cash_received,change_due,item_count,cashier,vat_inclusive,vat_rate,service_charge,service_charge_rate,
-        currency,status,synced,created_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)
+        origin_device,currency,status,synced,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)
       ON CONFLICT(id) DO UPDATE SET receipt_no=excluded.receipt_no,order_no=excluded.order_no,order_date=excluded.order_date,
         subtotal=excluded.subtotal,vat_amount=excluded.vat_amount,total=excluded.total,cash_received=excluded.cash_received,
         change_due=excluded.change_due,item_count=excluded.item_count,cashier=excluded.cashier,
         vat_inclusive=excluded.vat_inclusive,vat_rate=excluded.vat_rate,service_charge=excluded.service_charge,
-        service_charge_rate=excluded.service_charge_rate,currency=excluded.currency,status=excluded.status,synced=1`,
+        service_charge_rate=excluded.service_charge_rate,origin_device=excluded.origin_device,
+        currency=excluded.currency,status=excluded.status,synced=1`,
       [s.id, s.tenant_id, s.receipt_no, s.order_no, s.order_date, s.subtotal, s.vat_amount, s.total,
        s.cash_received, s.change_due, s.item_count, s.cashier, s.vat_inclusive, s.vat_rate,
-       s.service_charge ?? 0, s.service_charge_rate ?? 0, s.currency, s.status || 'completed',
+       s.service_charge ?? 0, s.service_charge_rate ?? 0, s.origin_device ?? null, s.currency, s.status || 'completed',
        s.created_at || DB.nowISO()]);
   }
   function upsertSaleItem(it) {

@@ -58,6 +58,15 @@ window.Config = (function () {
     return (base || '').replace(/\/+$/, '');
   }
   function deviceName() { return DB.getSetting('device_name') || 'Register 1'; }
+  // Stable id for THIS device/browser (local only, never synced as a row).
+  function deviceId() {
+    let id = DB.getSetting('device_id');
+    if (!id) {
+      id = 'dev_' + (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+      DB.setSetting('device_id', id);
+    }
+    return id;
+  }
   function cashierName() { return DB.getSetting('cashier_name') || 'Cashier'; }
   function adminPin() { return DB.getSetting('admin_pin') || '1234'; }
 
@@ -139,7 +148,7 @@ window.Config = (function () {
   return {
     CURRENCY_SYMBOLS, money, vatBreakdown,
     activeTenantId, activeTenant, setActiveTenant,
-    apiBase, deviceName, cashierName: cashierNameResolved, adminPin,
+    apiBase, deviceName, deviceId, cashierName: cashierNameResolved, adminPin,
     DEFAULT_API_BASE, effectivePrice, hasDiscount,
     nextReceiptNo, nextOrderNo, todayKey, escapeHtml,
     randomSalt, hashPin, currentSession, setSession, currentRole

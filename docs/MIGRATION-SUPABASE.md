@@ -63,6 +63,7 @@ create table if not exists tenants (
   logo_on_receipt int default 1,
   order_no_on_receipt int default 1,
   analytics_enabled int default 0,
+  remote_sales_enabled int default 1,
   categories text,
   receipt_footer text,
   logo text,
@@ -110,6 +111,7 @@ create table if not exists sales (
   cash_received numeric, change_due numeric, item_count numeric,
   cashier text, vat_inclusive int, vat_rate numeric,
   service_charge numeric default 0, service_charge_rate numeric default 0,
+  origin_device text,
   currency text, status text default 'completed', synced int default 1,
   created_at timestamptz, received_at timestamptz default now(),
   updated_at timestamptz, seq bigserial

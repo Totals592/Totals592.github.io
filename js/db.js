@@ -84,6 +84,7 @@ window.DB = (function () {
     logo_on_receipt INTEGER DEFAULT 1,
     order_no_on_receipt INTEGER DEFAULT 1,
     analytics_enabled INTEGER DEFAULT 0,
+    remote_sales_enabled INTEGER DEFAULT 1,
     categories TEXT,
     receipt_footer TEXT,
     logo TEXT,
@@ -156,6 +157,7 @@ window.DB = (function () {
     vat_rate REAL,
     service_charge REAL DEFAULT 0,
     service_charge_rate REAL DEFAULT 0,
+    origin_device TEXT,
     currency TEXT,
     status TEXT DEFAULT 'completed',
     synced INTEGER DEFAULT 0,
@@ -332,6 +334,8 @@ window.DB = (function () {
     ensureColumn('tenants', 'analytics_enabled', 'INTEGER DEFAULT 0');
     ensureColumn('variations', 'discount_type', "TEXT DEFAULT 'none'");
     ensureColumn('variations', 'discount_value', 'REAL DEFAULT 0');
+    ensureColumn('tenants', 'remote_sales_enabled', 'INTEGER DEFAULT 1');
+    ensureColumn('sales', 'origin_device', 'TEXT');
   }
 
   /* ---------- Init ---------- */
