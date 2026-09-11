@@ -1048,7 +1048,7 @@
     $('#setApiBase').value = (storedApi === null || storedApi === undefined) ? Config.DEFAULT_API_BASE : storedApi;
     updateSyncPill();
     const q = tenantFilter.toLowerCase();
-    const rows = DB.all('SELECT * FROM tenants ORDER BY name').filter((t) =>
+    const rows = DB.all("SELECT * FROM tenants WHERE status != 'deleted' ORDER BY name").filter((t) =>
       !q || (t.name + ' ' + (t.tin || '')).toLowerCase().includes(q));
     $('#tenantTable tbody').innerHTML = rows.map((t) => {
       const pc = DB.get('SELECT COUNT(*) AS n FROM products WHERE tenant_id=? AND active=1', [t.id]);
@@ -1062,6 +1062,7 @@
           <button class="btn small" data-stafftenant="${t.id}">Staff</button>
           <button class="btn small" data-usetenant="${t.id}">Open</button>
           <button class="btn small ${t.status === 'suspended' ? 'brand' : 'danger'}" data-toggletenant="${t.id}">${t.status === 'suspended' ? 'Activate' : 'Suspend'}</button>
+          <button class="btn small danger" data-deletetenant="${t.id}">Delete</button>
         </div></td>
       </tr>`;
     }).join('');
@@ -1134,13 +1135,60 @@
     });
   }
 
+  // Permanently delete a tenant: remove the shop and ALL its data from this
+  // device, then mark it "deleted" so it disappears from login and the admin
+  // list on every device (other devices purge its data when they receive this
+  // status — see Sync.upsertTenant). A tombstone tenant row is kept so the
+  // deletion propagates and the shop is never resurrected as active.
+  function deleteTenant(tid) {
+    const t = DB.get('SELECT * FROM tenants WHERE id = ?', [tid]);
+    if (!t) return;
+    const counts = {
+      products: (DB.get('SELECT COUNT(*) AS n FROM products WHERE tenant_id=?', [tid]) || {}).n || 0,
+      sales: (DB.get('SELECT COUNT(*) AS n FROM sales WHERE tenant_id=?', [tid]) || {}).n || 0,
+      staff: (DB.get('SELECT COUNT(*) AS n FROM staff WHERE tenant_id=?', [tid]) || {}).n || 0
+    };
+    if (!confirm('Permanently DELETE "' + t.name + '"?\n\nThis removes the shop and all of its data '
+      + '(' + counts.products + ' products, ' + counts.sales + ' sales, ' + counts.staff + ' staff) '
+      + 'from this device, and hides it on every device. This cannot be undone.')) return;
+
+    const now = DB.nowISO();
+    // Tell the cloud/other devices first (upsert the tenant with a deleted status).
+    Sync.queue('tenant', tid, 'update', { id: tid, status: 'deleted', updated_at: now }, tid);
+    // Keep a local tombstone so pulls don't resurrect it as an active shop, but
+    // wipe the heavy data to reclaim space on this device.
+    DB.run("UPDATE tenants SET status='deleted', updated_at=? WHERE id=?", [now, tid]);
+    purgeTenantData(tid);
+
+    // If we just deleted the shop this device was showing, switch to another.
+    if (Config.activeTenantId() === tid) {
+      const other = DB.get("SELECT id FROM tenants WHERE status NOT IN ('deleted','suspended') ORDER BY name LIMIT 1");
+      if (other) Config.setActiveTenant(other.id);
+      else DB.run("DELETE FROM settings WHERE key = 'active_tenant_id'");
+    }
+    // If the current session belongs to the deleted shop, sign out cleanly.
+    const s = Config.currentSession();
+    if (s && s.tenant_id === tid) { DB.persistNow(); signOut(); return; }
+
+    DB.persistNow();
+    updateTopbar(); renderAdmin();
+    toast('Tenant deleted', 'ok');
+  }
+
+  // Remove all of a tenant's rows except the tenant record itself.
+  function purgeTenantData(tid) {
+    ['sale_items', 'sales', 'variations', 'products', 'suppliers', 'staff'].forEach((tbl) => {
+      DB.run('DELETE FROM ' + tbl + ' WHERE tenant_id = ?', [tid]);
+    });
+  }
+
   /* ---------------- Authentication & sessions ---------------- */
 
   // Tabs a cashier may not open. Managers/admins see everything.
   const MANAGER_TABS = ['inventory', 'suppliers', 'settings'];
 
   function activeTenants() {
-    return DB.all("SELECT * FROM tenants WHERE status != 'suspended' ORDER BY name");
+    return DB.all("SELECT * FROM tenants WHERE status != 'suspended' AND status != 'deleted' ORDER BY name");
   }
 
   function populateLoginTenants() {
@@ -1297,7 +1345,7 @@
   function restoreSession() {
     const s = Config.currentSession();
     if (!s) return false;
-    const t = DB.get("SELECT * FROM tenants WHERE id = ? AND status != 'suspended'", [s.tenant_id]);
+    const t = DB.get("SELECT * FROM tenants WHERE id = ? AND status != 'suspended' AND status != 'deleted'", [s.tenant_id]);
     if (!t) return false;
     if (s.admin) { Config.setActiveTenant(s.tenant_id); return true; } // device-admin override
     const staff = DB.get('SELECT * FROM staff WHERE id = ? AND active = 1', [s.staff_id]);
@@ -1674,8 +1722,10 @@
     $('#tenantTable').addEventListener('click', (e) => {
       const ed = e.target.closest('[data-edittenant]'); const use = e.target.closest('[data-usetenant]');
       const tog = e.target.closest('[data-toggletenant]'); const stf = e.target.closest('[data-stafftenant]');
+      const del = e.target.closest('[data-deletetenant]');
       if (ed) tenantModal(ed.dataset.edittenant);
       if (stf) adminStaffModal(stf.dataset.stafftenant);
+      if (del) return deleteTenant(del.dataset.deletetenant);
       // "Open" signs in with a device-admin override (full access, no PIN reprompt).
       if (use) {
         const t = DB.get('SELECT * FROM tenants WHERE id=?', [use.dataset.usetenant]);

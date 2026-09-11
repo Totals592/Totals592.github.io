@@ -151,6 +151,13 @@ window.Sync = (function () {
        t.logo_on_receipt ?? 1, t.order_no_on_receipt ?? 1, t.analytics_enabled ?? 0, t.remote_sales_enabled ?? 1,
        t.categories ?? null, t.receipt_footer, t.logo, t.status || 'active',
        t.updated_at || DB.nowISO(), t.created_at || DB.nowISO()]);
+    // A shop deleted on another device: purge its data here too (keep the
+    // tombstone row so it stays hidden and is never resurrected as active).
+    if (t.status === 'deleted') {
+      ['sale_items', 'sales', 'variations', 'products', 'suppliers', 'staff'].forEach((tbl) => {
+        DB.run('DELETE FROM ' + tbl + ' WHERE tenant_id = ?', [t.id]);
+      });
+    }
   }
   function upsertProduct(p) {
     if (!newer(p, 'products')) return;
