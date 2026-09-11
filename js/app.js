@@ -336,12 +336,13 @@
     const now = DB.nowISO();
     const change = cash - tot.total;
 
+    const originDevice = Config.deviceId();
     DB.run(`INSERT INTO sales(id,tenant_id,receipt_no,order_no,order_date,subtotal,vat_amount,total,cash_received,change_due,
-             item_count,cashier,vat_inclusive,vat_rate,service_charge,service_charge_rate,currency,status,synced,created_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+             item_count,cashier,vat_inclusive,vat_rate,service_charge,service_charge_rate,origin_device,currency,status,synced,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [saleId, t.id, receiptNo, orderNo, orderDate, tot.itemsNet, tot.vat, tot.total, cash, change, tot.count,
        Config.cashierName(), t.vat_inclusive ? 1 : 0, tot.vatOn ? t.vat_rate : 0,
-       tot.service, tot.svcOn ? t.service_charge_rate : 0, t.currency, 'completed', 0, now]);
+       tot.service, tot.svcOn ? t.service_charge_rate : 0, originDevice, t.currency, 'completed', 0, now]);
 
     const items = cart.map((c) => {
       const id = DB.uid('si');
@@ -365,7 +366,7 @@
       cash_received: cash, change_due: change, cashier: Config.cashierName(),
       vat_inclusive: t.vat_inclusive, vat_rate: tot.vatOn ? t.vat_rate : 0,
       service_charge: tot.service, service_charge_rate: tot.svcOn ? t.service_charge_rate : 0,
-      created_at: now
+      origin_device: originDevice, created_at: now
     };
     // Queue the whole sale for the cloud (real-time figures across channels).
     Sync.queue('sale', saleId, 'create', { sale: Object.assign({ id: saleId, tenant_id: t.id }, saleRow), items }, t.id);
@@ -759,7 +760,11 @@
   function renderReports() {
     const tid = Config.activeTenantId();
     const today = new Date(); today.setHours(0, 0, 0, 0);
-    const allSales = DB.all('SELECT * FROM sales WHERE tenant_id = ? ORDER BY created_at DESC', [tid]);
+    let allSales = DB.all('SELECT * FROM sales WHERE tenant_id = ? ORDER BY created_at DESC', [tid]);
+    // Admin control: if remote sales are disabled for this shop, a manager only
+    // sees sales made on THIS device (data still syncs; this is an access gate).
+    const remoteOn = (Config.activeTenant() || {}).remote_sales_enabled !== 0;
+    if (!remoteOn) { const mine = Config.deviceId(); allSales = allSales.filter((s) => (s.origin_device || '') === mine); }
     const isVoid = (s) => (s.status || 'completed') === 'voided';
     const pending = DB.get('SELECT COUNT(*) AS n FROM sales WHERE tenant_id=? AND synced=0', [tid]);
 
@@ -790,7 +795,8 @@
 
     // Money figures are masked until the manager explicitly reveals them.
     $('#repShowFigures').checked = repShowFigures;
-    $('#repPrivacyHint').textContent = repShowFigures ? 'Figures are visible.' : 'Figures are hidden by default for privacy.';
+    $('#repPrivacyHint').textContent = (repShowFigures ? 'Figures are visible.' : 'Figures are hidden by default for privacy.')
+      + (remoteOn ? '' : ' Showing this device only (multi-device view is off).');
     const cash = (v) => repShowFigures ? money(v) : '••••••';
 
     // Report Analytics is a tier feature: the button stays inert until an admin
@@ -847,10 +853,15 @@
   function openAnalytics() {
     const tid = Config.activeTenantId();
     const since = new Date(Date.now() - 29 * 864e5); // last 30 days
+    const remoteOn = (Config.activeTenant() || {}).remote_sales_enabled !== 0;
+    const mine = Config.deviceId();
     const sales = DB.all('SELECT * FROM sales WHERE tenant_id=? ORDER BY created_at DESC', [tid])
-      .filter((s) => (s.status || 'completed') !== 'voided' && new Date(s.created_at) >= since);
+      .filter((s) => (s.status || 'completed') !== 'voided' && new Date(s.created_at) >= since
+        && (remoteOn || (s.origin_device || '') === mine));
+    const okSaleIds = new Set(sales.map((s) => s.id));
     const items = DB.all(`SELECT si.* FROM sale_items si JOIN sales s ON s.id=si.sale_id
-      WHERE si.tenant_id=? AND (s.status IS NULL OR s.status='completed') AND s.created_at >= ?`, [tid, since.toISOString()]);
+      WHERE si.tenant_id=? AND (s.status IS NULL OR s.status='completed') AND s.created_at >= ?`, [tid, since.toISOString()])
+      .filter((it) => okSaleIds.has(it.sale_id));
 
     const total = sales.reduce((a, s) => a + s.total, 0);
     const count = sales.length;
@@ -1011,6 +1022,7 @@
         </div>
         <label>Receipt footer message</label><input id="tFooter" value="${esc(t.receipt_footer || '')}">
         <label class="switch" style="margin-top:10px"><input type="checkbox" id="tAnalytics" ${t.analytics_enabled === 1 ? 'checked' : ''}> Enable Report Analytics (paid tier)</label>
+        <label class="switch"><input type="checkbox" id="tRemoteSales" ${(t.remote_sales_enabled ?? 1) !== 0 ? 'checked' : ''}> Managers can see real-time sales from all devices</label>
       </div>
       <div class="foot"><button class="btn ghost" data-close>Cancel</button><button class="btn brand" id="tSave">Save</button></div>`, true);
     const m = $('#modal');
@@ -1025,17 +1037,18 @@
         address: $('#tAddr', m).value.trim(), currency: $('#tCur', m).value,
         vat_rate: parseFloat($('#tVat', m).value) || 0, vat_inclusive: parseInt($('#tVatInc', m).value, 10),
         status: $('#tStatus', m).value, receipt_footer: $('#tFooter', m).value.trim(),
-        analytics_enabled: $('#tAnalytics', m).checked ? 1 : 0
+        analytics_enabled: $('#tAnalytics', m).checked ? 1 : 0,
+        remote_sales_enabled: $('#tRemoteSales', m).checked ? 1 : 0
       };
       let id = tid;
       if (editing) {
-        DB.run(`UPDATE tenants SET name=?,tin=?,slug=?,phone=?,email=?,address=?,currency=?,vat_rate=?,vat_inclusive=?,status=?,receipt_footer=?,analytics_enabled=?,updated_at=? WHERE id=?`,
-          [vals.name, vals.tin, vals.slug, vals.phone, vals.email, vals.address, vals.currency, vals.vat_rate, vals.vat_inclusive, vals.status, vals.receipt_footer, vals.analytics_enabled, now, tid]);
+        DB.run(`UPDATE tenants SET name=?,tin=?,slug=?,phone=?,email=?,address=?,currency=?,vat_rate=?,vat_inclusive=?,status=?,receipt_footer=?,analytics_enabled=?,remote_sales_enabled=?,updated_at=? WHERE id=?`,
+          [vals.name, vals.tin, vals.slug, vals.phone, vals.email, vals.address, vals.currency, vals.vat_rate, vals.vat_inclusive, vals.status, vals.receipt_footer, vals.analytics_enabled, vals.remote_sales_enabled, now, tid]);
       } else {
         id = DB.uid('ten');
-        DB.run(`INSERT INTO tenants(id,name,tin,slug,phone,email,address,currency,vat_rate,vat_inclusive,status,receipt_footer,analytics_enabled,updated_at,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [id, vals.name, vals.tin, vals.slug, vals.phone, vals.email, vals.address, vals.currency, vals.vat_rate, vals.vat_inclusive, vals.status, vals.receipt_footer, vals.analytics_enabled, now, now]);
+        DB.run(`INSERT INTO tenants(id,name,tin,slug,phone,email,address,currency,vat_rate,vat_inclusive,status,receipt_footer,analytics_enabled,remote_sales_enabled,updated_at,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [id, vals.name, vals.tin, vals.slug, vals.phone, vals.email, vals.address, vals.currency, vals.vat_rate, vals.vat_inclusive, vals.status, vals.receipt_footer, vals.analytics_enabled, vals.remote_sales_enabled, now, now]);
         // Give a brand-new shop a default manager login (change the PIN after).
         await createStaff(id, { name: 'Manager', username: 'manager', pin: '1234', role: 'manager' });
       }

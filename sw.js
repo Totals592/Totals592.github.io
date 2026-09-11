@@ -12,7 +12,7 @@
  *   to reinstall anything and no store review is involved.
  */
 
-const APP_VERSION = 'v1.6.2';
+const APP_VERSION = 'v1.7.0';
 const CACHE = `totals-pos-${APP_VERSION}`;
 
 // The complete app shell. Everything here is available offline after first load.
