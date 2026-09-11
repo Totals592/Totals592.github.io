@@ -93,6 +93,7 @@
             <input class="grow" id="invSearch" placeholder="Search products, SKU or category…">
             <button class="btn accent" id="scanAddBtn">📷 Scan to add</button>
             <button class="btn brand" id="addProductBtn">+ Product</button>
+            <button class="btn" id="expiringBtn">⏰ Expiring soon</button>
             <button class="btn" id="exportInvBtn">Export CSV</button>
           </div>
           <div class="card">
@@ -137,6 +138,15 @@
               <input type="date" id="repTo" title="To date" style="width:auto">
               <input class="grow" id="repSearch" placeholder="Search invoice no. or date (YYYY-MM-DD)…">
               <button class="btn small" id="repClearFilter">Clear</button>
+            </div>
+          </div>
+          <div class="card" id="repCashCard">
+            <div class="section-title"><h3>Cash drawer</h3><span class="muted">Optional</span></div>
+            <p class="muted">Enter the cash you started the day with (float). Leave blank to skip.</p>
+            <div class="toolbar">
+              <label for="repStartCash" style="align-self:center">Starting cash</label>
+              <input type="number" id="repStartCash" step="0.01" min="0" placeholder="0" style="width:140px">
+              <span class="pill">Expected in drawer: <b id="repExpectedCash" style="margin-left:6px">—</b></span>
             </div>
           </div>
           <div class="kpis" id="repKpis"></div>
@@ -277,11 +287,12 @@
             <div class="toolbar">
               <button class="btn" id="backupBtn">Download backup (.sqlite)</button>
               <button class="btn" id="backupXlsxBtn">Download Excel (.xlsx)</button>
+              <button class="btn" id="weeklyBackupBtn">Download weekly auto-backup</button>
               <button class="btn" id="restoreBtn">Restore backup</button>
               <input type="file" id="restoreFile" accept=".sqlite,.db" hidden>
               <button class="btn danger" id="wipeBtn">Erase all local data</button>
             </div>
-            <p class="hint">The <b>.sqlite</b> backup is the full database and is the one you restore from. The <b>.xlsx</b> export is a readable Excel workbook (products, stock, sales, staff, suppliers) for reporting — it is not used for restore.</p>
+            <p class="hint">The <b>.sqlite</b> backup is the full database and is the one you restore from. The <b>.xlsx</b> export is a readable Excel workbook (products, stock, sales, staff, suppliers) for reporting — it is not used for restore. A <b>weekly auto-backup</b> is also kept automatically in this device's storage and refreshed once a week; use the button to download the latest copy.</p>
           </div>
           <div class="card">
             <h3>About</h3>

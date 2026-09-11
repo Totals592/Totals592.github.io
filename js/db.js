@@ -58,6 +58,35 @@ window.DB = (function () {
     persistTimer = setTimeout(persistNow, 300);
   }
 
+  /* ---------- Weekly auto-backup (kept in device storage) ----------
+   * Once a week the full SQLite image is copied to a fixed IndexedDB key,
+   * OVERWRITING the previous week's copy. It survives reloads and offline
+   * restarts, and never leaves the device. A "week" is a 7-day bucket so the
+   * copy is refreshed at most once per week regardless of how often the app is
+   * opened. */
+  const BACKUP_KEY = 'weekly-backup';
+  const BACKUP_META_KEY = 'weekly-backup-meta';
+  function weekIndex(d) { return Math.floor(((d || new Date()).getTime()) / (7 * 24 * 60 * 60 * 1000)); }
+
+  async function autoBackupIfDue() {
+    if (!db) return;
+    let meta = null;
+    try { meta = await idbGet(BACKUP_META_KEY); } catch (e) { meta = null; }
+    const wk = weekIndex();
+    if (meta && meta.week === wk) return; // already backed up this week
+    try {
+      await idbPut(BACKUP_KEY, db.export());
+      await idbPut(BACKUP_META_KEY, { week: wk, at: nowISO() });
+    } catch (e) { /* storage may be full or blocked — never break the app */ }
+  }
+  async function getWeeklyBackup() {
+    try {
+      const bytes = await idbGet(BACKUP_KEY);
+      const meta = await idbGet(BACKUP_META_KEY);
+      return bytes ? { bytes, at: meta && meta.at } : null;
+    } catch (e) { return null; }
+  }
+
   /* ---------- Schema ---------- */
   const SCHEMA = `
   CREATE TABLE IF NOT EXISTS settings (
@@ -135,6 +164,7 @@ window.DB = (function () {
     supplier_id TEXT,
     discount_type TEXT DEFAULT 'none',
     discount_value REAL DEFAULT 0,
+    expiry_date TEXT,
     active INTEGER DEFAULT 1,
     updated_at TEXT,
     created_at TEXT
@@ -174,6 +204,7 @@ window.DB = (function () {
     sku TEXT,
     qty REAL,
     unit_price REAL,
+    list_price REAL,
     line_total REAL
   );
 
@@ -186,6 +217,8 @@ window.DB = (function () {
     pin_hash TEXT,
     salt TEXT,
     role TEXT DEFAULT 'cashier',
+    can_view_sales INTEGER DEFAULT 0,
+    can_manage_inventory INTEGER DEFAULT 0,
     active INTEGER DEFAULT 1,
     updated_at TEXT,
     created_at TEXT
@@ -336,6 +369,10 @@ window.DB = (function () {
     ensureColumn('variations', 'discount_value', 'REAL DEFAULT 0');
     ensureColumn('tenants', 'remote_sales_enabled', 'INTEGER DEFAULT 1');
     ensureColumn('sales', 'origin_device', 'TEXT');
+    ensureColumn('variations', 'expiry_date', 'TEXT');
+    ensureColumn('sale_items', 'list_price', 'REAL');
+    ensureColumn('staff', 'can_view_sales', 'INTEGER DEFAULT 0');
+    ensureColumn('staff', 'can_manage_inventory', 'INTEGER DEFAULT 0');
   }
 
   /* ---------- Init ---------- */
@@ -363,6 +400,7 @@ window.DB = (function () {
   return {
     init, all, get, run, uid, nowISO,
     getSetting, setSetting, persistNow,
+    autoBackupIfDue, getWeeklyBackup,
     // expose for import/export/backup
     export: () => db.export(),
     import: async (bytes) => { db = new SQL.Database(new Uint8Array(bytes)); db.run(SCHEMA); await persistNow(); },

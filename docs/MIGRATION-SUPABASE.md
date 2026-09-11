@@ -1,8 +1,13 @@
-# Migrating Totals POS to Supabase + Netlify
+# Migrating Totals POS to Supabase (hosted on GitHub Pages)
 
-This guide takes the app from its GitHub Pages + reference-server setup to
-**Netlify (frontend hosting)** and **Supabase (Postgres database, storage, and —
-for production — authentication)**, sized for a **2-tenant user test**.
+This guide takes the app from its reference-server setup to **Supabase (Postgres
+database, storage, and — for production — authentication)** as the cloud backend,
+while the front end stays on **GitHub Pages**, sized for a **2-tenant user test**.
+
+> **Hosting:** the front end is served from GitHub Pages
+> (`totals592.github.io`) and the backend is a **Supabase Edge Function**. This
+> is the GitHub + Supabase setup used for testing. (Netlify was an earlier
+> option and is no longer used — those files were removed from the repo.)
 
 There are two milestones:
 
@@ -20,7 +25,7 @@ SQLite-WASM database and syncs up/down. Supabase is the cloud mirror.
 
 | Piece | Today | After migration |
 |-------|-------|-----------------|
-| Frontend (PWA) | GitHub Pages | **Netlify** (same static files) |
+| Frontend (PWA) | GitHub Pages | **GitHub Pages** (unchanged — same static files) |
 | Cloud database | `server/data.json` | **Supabase Postgres** |
 | Sync API (`/api/sync`, `/api/pull`) | `server/server.js` | **Supabase Edge Function** |
 | Product/logo images | base64 in the DB | (optional) **Supabase Storage** |
@@ -93,6 +98,7 @@ create table if not exists variations (
   price numeric not null default 0, cost numeric default 0, stock numeric default 0,
   track_stock int default 1, low_stock_threshold numeric default 5,
   supplier_id text, discount_type text default 'none', discount_value numeric default 0,
+  expiry_date text,
   active int default 1,
   updated_at timestamptz, created_at timestamptz, seq bigserial
 );
@@ -100,7 +106,9 @@ create table if not exists variations (
 create table if not exists staff (
   id text primary key, tenant_id text not null references tenants(id),
   name text not null, username text not null, pin_hash text, salt text,
-  role text default 'cashier', active int default 1,
+  role text default 'cashier',
+  can_view_sales int default 0, can_manage_inventory int default 0,
+  active int default 1,
   updated_at timestamptz, created_at timestamptz, seq bigserial
 );
 
@@ -121,7 +129,7 @@ create table if not exists sale_items (
   id text primary key, sale_id text not null references sales(id),
   tenant_id text not null references tenants(id),
   product_id text, variation_id text, name text, sku text,
-  qty numeric, unit_price numeric, line_total numeric,
+  qty numeric, unit_price numeric, list_price numeric, line_total numeric,
   updated_at timestamptz, seq bigserial
 );
 
@@ -136,35 +144,61 @@ create index if not exists idx_sales_tenant on sales(tenant_id);
 The `seq bigserial` columns give the cursor the app's `/api/pull` uses: the
 function returns rows whose `seq` is greater than the register's last cursor.
 
-## 3. The sync API
+### 2a. Make updates re-sync (required for voids to reach other devices)
+
+A `bigserial` column only auto-increments on **INSERT**, never on **UPDATE**.
+Without help, when one register **voids** a sale (or an admin edits a price),
+the row is updated but its `seq` stays the same — so any device whose cursor is
+already past that `seq` never re-downloads it and never sees the change. That is
+exactly why a void on one device didn't appear on another.
+
+The fix is a tiny trigger that bumps `seq` to a fresh value on every UPDATE, so
+the changed row jumps ahead of every register's cursor and is pulled again. Run
+this once in the SQL Editor:
+
+```sql
+create or replace function bump_seq() returns trigger
+language plpgsql as $$
+begin
+  new.seq := nextval(pg_get_serial_sequence(tg_table_name, 'seq'));
+  return new;
+end $$;
+
+do $$
+declare t text;
+begin
+  foreach t in array array['tenants','products','variations','staff','sales','sale_items']
+  loop
+    execute format('drop trigger if exists %I_bump_seq on %I', t, t);
+    execute format('create trigger %I_bump_seq before update on %I
+                    for each row execute function bump_seq()', t, t);
+  end loop;
+end $$;
+```
+
+After this, voiding a sale on register A propagates to register B on its next
+sync, and remote catalogue/price edits always re-download too.
+
+### 2b. Already have the tables? Add the new columns
+
+If your project was created before these features, add the new columns (safe to
+re-run — `if not exists` guards each one), then run 2a:
+
+```sql
+alter table variations add column if not exists expiry_date text;
+alter table sale_items add column if not exists list_price numeric;
+alter table staff      add column if not exists can_view_sales int default 0;
+alter table staff      add column if not exists can_manage_inventory int default 0;
+```
+
+## 3. The sync API — Supabase Edge Function
 
 You need one small server that implements `/api/sync` and `/api/pull` against
-Supabase. **Recommended path (no CLI, no Edge-Function UI): run it as a Netlify
-Function — it already ships in this repo.**
+Supabase. On the GitHub + Supabase setup this is a **Supabase Edge Function**
+named `api`. (This is already deployed for the live project; the code is here so
+you can review or redeploy it.)
 
-### 3A. Recommended — Netlify Function (already in the repo)
-
-The repo contains `netlify/functions/api.mjs`, `netlify.toml`, and a root
-`package.json`. When you connect this repo to Netlify (section 5), Netlify builds
-and hosts the function automatically and maps `/api/*` to it. There is nothing to
-paste or deploy by hand — you only set two environment variables in Netlify:
-
-| Netlify env var | Where to get it |
-|-----------------|-----------------|
-| `SUPABASE_URL` | Supabase → Project Settings → API → Project URL |
-| `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Project Settings → API → **service_role** key (secret) |
-
-Set them under **Netlify → Site configuration → Environment variables**, then
-redeploy. Your API base URL is simply **your Netlify site URL** (e.g.
-`https://your-site.netlify.app`) — the app appends `/api/sync` and `/api/pull`.
-The service-role key stays on Netlify's servers and is never sent to browsers.
-
-Skip to section 4. (Section 3B below is only if you prefer Supabase Edge
-Functions instead — you do not need both.)
-
-### 3B. Alternative — Supabase Edge Function (needs the Supabase CLI)
-
-This implements the SAME contract. Create `supabase/functions/api/index.ts`:
+Create `supabase/functions/api/index.ts`:
 
 ```ts
 import { serve } from "https://deno.land/std/http/server.ts";
@@ -254,32 +288,32 @@ in the **app** set the Cloud API base URL to the domain only —
 
 ## 4. Point the app at the sync API
 
-In the running app: **Admin → unlock → Cloud sync → Cloud API base URL**, then
-Save → Sync now:
-
-- **Netlify Function path (3A):** use your **Netlify site URL**, e.g.
-  `https://your-site.netlify.app`
-- **Edge Function path (3B):** use the domain **without** `/api` —
-  `https://<project-ref>.functions.supabase.co` (the app adds `/api/sync`
-  itself; including `/api` here would double it to `/api/api/sync`). This assumes
-  the function is named `api`.
+The app already ships with this URL baked in (Admin → Cloud sync shows it), so on
+the live site there is nothing to set. If you ever need to set it by hand —
+**Admin → unlock → Cloud sync → Cloud API base URL**, then Save → Sync now — use
+the Edge Function domain **without** `/api`:
+`https://<project-ref>.functions.supabase.co` (the app adds `/api/sync` and
+`/api/pull` itself; including `/api` here would double it to `/api/api/sync`).
+This assumes the function is named `api`.
 
 Each register now pushes sales/stock and pulls catalogue/tenant/staff changes
-from Supabase. (`/api/sync` and `/api/pull` are appended by the app.)
+from Supabase.
 
-## 5. Deploy the frontend to Netlify
+## 5. Host the frontend on GitHub Pages
 
-1. netlify.com → **Add new site → Import from Git** → pick this repo.
-2. Build command: *none*. Publish directory: `/` (root — it's static).
-3. Deploy. Netlify gives you `https://<name>.netlify.app`. Every push to `main`
-   redeploys automatically (same as the Pages workflow does now).
+The front end is already hosted on GitHub Pages — the repo's
+`.github/workflows/pages.yml` redeploys `totals592.github.io` on every push to
+`main`. There is nothing extra to set up: push to `main` and Pages rebuilds. The
+service worker then delivers the in-app "Update available" banner to installed
+registers.
 
-The service worker still delivers in-app updates on top of that.
+(A custom sub-domain can be added later via **Settings → Pages → Custom domain**
+plus a `CNAME` file, once testing is done.)
 
 ## 6. Set up the two test tenants
 
-1. Open the Netlify URL, go to **Admin** (PIN `1234` — change it), create the two
-   shops (**+ New tenant**), each with name, TIN, currency **GYD**, VAT rate.
+1. Open `https://totals592.github.io`, go to **Admin** (PIN `1234` — change it),
+   create the two shops (**+ New tenant**), each with name, TIN, currency **GYD**, VAT rate.
 2. For each tenant, **Staff** → add a manager and a cashier with their own PINs.
 3. Sign in per shop and add a few products (or **📷 Scan to add**).
 4. Confirm sales on register A appear in Supabase (Table Editor → `sales`) and
@@ -339,7 +373,8 @@ Then:
 - Move product/logo images to **Supabase Storage** instead of base64.
 
 At that point you have a multi-tenant SaaS: many customers, one database, each
-isolated by RLS, scalable on Supabase's Postgres and Netlify's CDN.
+isolated by RLS, scalable on Supabase's Postgres and served from GitHub Pages'
+CDN.
 
 ---
 

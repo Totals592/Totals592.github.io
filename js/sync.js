@@ -151,6 +151,13 @@ window.Sync = (function () {
        t.logo_on_receipt ?? 1, t.order_no_on_receipt ?? 1, t.analytics_enabled ?? 0, t.remote_sales_enabled ?? 1,
        t.categories ?? null, t.receipt_footer, t.logo, t.status || 'active',
        t.updated_at || DB.nowISO(), t.created_at || DB.nowISO()]);
+    // A shop deleted on another device: purge its data here too (keep the
+    // tombstone row so it stays hidden and is never resurrected as active).
+    if (t.status === 'deleted') {
+      ['sale_items', 'sales', 'variations', 'products', 'suppliers', 'staff'].forEach((tbl) => {
+        DB.run('DELETE FROM ' + tbl + ' WHERE tenant_id = ?', [t.id]);
+      });
+    }
   }
   function upsertProduct(p) {
     if (!newer(p, 'products')) return;
@@ -163,24 +170,26 @@ window.Sync = (function () {
   }
   function upsertVariation(v) {
     if (!newer(v, 'variations')) return;
-    DB.run(`INSERT INTO variations(id,product_id,tenant_id,name,sku,barcode,price,cost,stock,track_stock,low_stock_threshold,supplier_id,discount_type,discount_value,active,updated_at,created_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    DB.run(`INSERT INTO variations(id,product_id,tenant_id,name,sku,barcode,price,cost,stock,track_stock,low_stock_threshold,supplier_id,discount_type,discount_value,expiry_date,active,updated_at,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET name=excluded.name,sku=excluded.sku,barcode=excluded.barcode,price=excluded.price,
         cost=excluded.cost,stock=excluded.stock,track_stock=excluded.track_stock,low_stock_threshold=excluded.low_stock_threshold,
         supplier_id=excluded.supplier_id,discount_type=excluded.discount_type,discount_value=excluded.discount_value,
-        active=excluded.active,updated_at=excluded.updated_at`,
+        expiry_date=excluded.expiry_date,active=excluded.active,updated_at=excluded.updated_at`,
       [v.id, v.product_id, v.tenant_id, v.name, v.sku, v.barcode, v.price, v.cost, v.stock,
        v.track_stock ?? 1, v.low_stock_threshold ?? 5, v.supplier_id, v.discount_type || 'none', v.discount_value ?? 0,
-       v.active ?? 1, v.updated_at || DB.nowISO(), v.created_at || DB.nowISO()]);
+       v.expiry_date ?? null, v.active ?? 1, v.updated_at || DB.nowISO(), v.created_at || DB.nowISO()]);
   }
   function upsertStaff(s) {
     if (!newer(s, 'staff')) return;
-    DB.run(`INSERT INTO staff(id,tenant_id,name,username,pin_hash,salt,role,active,updated_at,created_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?)
+    DB.run(`INSERT INTO staff(id,tenant_id,name,username,pin_hash,salt,role,can_view_sales,can_manage_inventory,active,updated_at,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET name=excluded.name,username=excluded.username,pin_hash=excluded.pin_hash,
-        salt=excluded.salt,role=excluded.role,active=excluded.active,updated_at=excluded.updated_at`,
+        salt=excluded.salt,role=excluded.role,can_view_sales=excluded.can_view_sales,
+        can_manage_inventory=excluded.can_manage_inventory,active=excluded.active,updated_at=excluded.updated_at`,
       [s.id, s.tenant_id, s.name, (s.username || '').toLowerCase(), s.pin_hash, s.salt,
-       s.role || 'cashier', s.active ?? 1, s.updated_at || DB.nowISO(), s.created_at || DB.nowISO()]);
+       s.role || 'cashier', s.can_view_sales ?? 0, s.can_manage_inventory ?? 0,
+       s.active ?? 1, s.updated_at || DB.nowISO(), s.created_at || DB.nowISO()]);
   }
   // Sales replicate to every device (overwrite by id; the cloud copy wins, which
   // also propagates voids). Marked synced since they came from the cloud.
@@ -201,12 +210,12 @@ window.Sync = (function () {
        s.created_at || DB.nowISO()]);
   }
   function upsertSaleItem(it) {
-    DB.run(`INSERT INTO sale_items(id,sale_id,tenant_id,product_id,variation_id,name,sku,qty,unit_price,line_total)
-      VALUES(?,?,?,?,?,?,?,?,?,?)
+    DB.run(`INSERT INTO sale_items(id,sale_id,tenant_id,product_id,variation_id,name,sku,qty,unit_price,list_price,line_total)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET sale_id=excluded.sale_id,name=excluded.name,sku=excluded.sku,
-        qty=excluded.qty,unit_price=excluded.unit_price,line_total=excluded.line_total`,
+        qty=excluded.qty,unit_price=excluded.unit_price,list_price=excluded.list_price,line_total=excluded.line_total`,
       [it.id, it.sale_id, it.tenant_id, it.product_id, it.variation_id, it.name, it.sku,
-       it.qty, it.unit_price, it.line_total]);
+       it.qty, it.unit_price, it.list_price ?? it.unit_price, it.line_total]);
   }
 
   /* ---------- Orchestration ---------- */

@@ -139,13 +139,14 @@ set the **Cloud API base URL** in the app's Settings.
   of record.
 - Everything except an (optional) live backend works with the network off.
 
-## Scaling to many customers (Supabase + Netlify)
+## Scaling to many customers (GitHub Pages + Supabase)
 
-To host on Netlify and move the cloud database to Supabase — with real accounts
-and per-tenant isolation for a multi-customer SaaS — follow
+The front end is hosted on **GitHub Pages** and the cloud database is
+**Supabase** (a Supabase Edge Function implements the app's sync contract). To
+add real accounts and per-tenant isolation for a multi-customer SaaS, follow
 [`docs/MIGRATION-SUPABASE.md`](docs/MIGRATION-SUPABASE.md). It includes the
-Postgres schema, an Edge Function implementing the app's existing sync contract,
-Row-Level Security policies, and a step-by-step 2-tenant test setup.
+Postgres schema, the Edge Function, Row-Level Security policies, and a
+step-by-step 2-tenant test setup.
 
 ## Roadmap
 
