@@ -93,6 +93,7 @@ create table if not exists variations (
   price numeric not null default 0, cost numeric default 0, stock numeric default 0,
   track_stock int default 1, low_stock_threshold numeric default 5,
   supplier_id text, discount_type text default 'none', discount_value numeric default 0,
+  expiry_date text,
   active int default 1,
   updated_at timestamptz, created_at timestamptz, seq bigserial
 );
@@ -100,7 +101,9 @@ create table if not exists variations (
 create table if not exists staff (
   id text primary key, tenant_id text not null references tenants(id),
   name text not null, username text not null, pin_hash text, salt text,
-  role text default 'cashier', active int default 1,
+  role text default 'cashier',
+  can_view_sales int default 0, can_manage_inventory int default 0,
+  active int default 1,
   updated_at timestamptz, created_at timestamptz, seq bigserial
 );
 
@@ -121,7 +124,7 @@ create table if not exists sale_items (
   id text primary key, sale_id text not null references sales(id),
   tenant_id text not null references tenants(id),
   product_id text, variation_id text, name text, sku text,
-  qty numeric, unit_price numeric, line_total numeric,
+  qty numeric, unit_price numeric, list_price numeric, line_total numeric,
   updated_at timestamptz, seq bigserial
 );
 
@@ -135,6 +138,53 @@ create index if not exists idx_sales_tenant on sales(tenant_id);
 
 The `seq bigserial` columns give the cursor the app's `/api/pull` uses: the
 function returns rows whose `seq` is greater than the register's last cursor.
+
+### 2a. Make updates re-sync (required for voids to reach other devices)
+
+A `bigserial` column only auto-increments on **INSERT**, never on **UPDATE**.
+Without help, when one register **voids** a sale (or an admin edits a price),
+the row is updated but its `seq` stays the same — so any device whose cursor is
+already past that `seq` never re-downloads it and never sees the change. That is
+exactly why a void on one device didn't appear on another.
+
+The fix is a tiny trigger that bumps `seq` to a fresh value on every UPDATE, so
+the changed row jumps ahead of every register's cursor and is pulled again. Run
+this once in the SQL Editor:
+
+```sql
+create or replace function bump_seq() returns trigger
+language plpgsql as $$
+begin
+  new.seq := nextval(pg_get_serial_sequence(tg_table_name, 'seq'));
+  return new;
+end $$;
+
+do $$
+declare t text;
+begin
+  foreach t in array array['tenants','products','variations','staff','sales','sale_items']
+  loop
+    execute format('drop trigger if exists %I_bump_seq on %I', t, t);
+    execute format('create trigger %I_bump_seq before update on %I
+                    for each row execute function bump_seq()', t, t);
+  end loop;
+end $$;
+```
+
+After this, voiding a sale on register A propagates to register B on its next
+sync, and remote catalogue/price edits always re-download too.
+
+### 2b. Already have the tables? Add the new columns
+
+If your project was created before these features, add the new columns (safe to
+re-run — `if not exists` guards each one), then run 2a:
+
+```sql
+alter table variations add column if not exists expiry_date text;
+alter table sale_items add column if not exists list_price numeric;
+alter table staff      add column if not exists can_view_sales int default 0;
+alter table staff      add column if not exists can_manage_inventory int default 0;
+```
 
 ## 3. The sync API
 

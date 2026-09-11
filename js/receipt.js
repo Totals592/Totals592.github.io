@@ -13,14 +13,29 @@ window.Receipt = (function () {
     const c = tenant.currency;
     const e = Config.escapeHtml;
     const dt = new Date(sale.created_at);
+    // A discounted line shows its original (pre-discount) price struck through.
+    const lineDiscount = (it) => {
+      const list = Number(it.list_price);
+      return (list && list > Number(it.unit_price) + 0.0001) ? (list - Number(it.unit_price)) * Number(it.qty) : 0;
+    };
     // SKU is intentionally NOT printed on the customer receipt.
-    const rows = items.map((it) => `
+    const rows = items.map((it) => {
+      const list = Number(it.list_price);
+      const discounted = list && list > Number(it.unit_price) + 0.0001;
+      const priceCell = discounted
+        ? `<span class="was">${Config.money(list, c)}</span> ${Config.money(it.unit_price, c)}`
+        : Config.money(it.unit_price, c);
+      return `
       <tr>
         <td class="l">${e(it.name)}</td>
         <td class="c">${it.qty}</td>
-        <td class="r">${Config.money(it.unit_price, c)}</td>
+        <td class="r">${priceCell}</td>
         <td class="r">${Config.money(it.line_total, c)}</td>
-      </tr>`).join('');
+      </tr>`;
+    }).join('');
+
+    // Total money saved from per-item discounts across the whole sale.
+    const discountTotal = items.reduce((s, it) => s + lineDiscount(it), 0);
 
     const vatLabel = sale.vat_inclusive
       ? `VAT (${sale.vat_rate}% incl.)`
@@ -57,6 +72,7 @@ window.Receipt = (function () {
       <div class="rule"></div>
       <div class="totals">
         <div><span>Subtotal (net)</span><span>${Config.money(sale.subtotal - 0, c)}</span></div>
+        ${discountTotal > 0.0001 ? `<div class="disc"><span>Discount</span><span>−${Config.money(discountTotal, c)}</span></div>` : ''}
         ${showVat ? `<div><span>${vatLabel}</span><span>${Config.money(sale.vat_amount, c)}</span></div>` : ''}
         ${showSvc ? `<div><span>${svcLabel}</span><span>${Config.money(sale.service_charge, c)}</span></div>` : ''}
         <div class="grand"><span>TOTAL</span><span>${Config.money(sale.total, c)}</span></div>
@@ -85,6 +101,8 @@ window.Receipt = (function () {
     table.items { width:100%; border-collapse:collapse; }
     table.items th, table.items td { padding:2px 0; font-size:11px; vertical-align:top; }
     .l{ text-align:left; } .c{ text-align:center; } .r{ text-align:right; }
+    .was { text-decoration:line-through; color:#666; font-size:10px; }
+    .totals .disc { color:#000; }
     .order { text-align:center; font-size:22px; font-weight:bold; letter-spacing:1px; margin:4px 0; }
     .totals .grand { font-size:14px; font-weight:bold; border-top:1px solid #000; border-bottom:1px solid #000; padding:3px 0; margin:3px 0; }
     .ftr { text-align:center; margin-top:6px; }

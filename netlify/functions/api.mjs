@@ -55,8 +55,10 @@ export async function handler(event) {
             await db.from('variations').update({ stock: next, updated_at: new Date().toISOString() }).eq('id', ch.entity_id);
           } else if (ch.entity === 'sale') {
             if (p.sale) await db.from('sales').upsert(p.sale);
+            // Use the client's item id (falls back to a uuid) so replays don't
+            // duplicate line items when a device pulls its own sale back.
             if (Array.isArray(p.items)) for (const it of p.items) {
-              await db.from('sale_items').upsert({ id: cryptoId(), sale_id: ch.entity_id, ...it });
+              await db.from('sale_items').upsert({ id: it.id || cryptoId(), sale_id: ch.entity_id, ...it });
             }
           }
           applied.push(ch.id);
@@ -65,17 +67,21 @@ export async function handler(event) {
       return json(200, { applied });
     }
 
-    // PULL — registers download rows changed since their cursor.
+    // PULL — registers download rows changed since their per-table cursor.
+    // Sales + line items now replicate to every device (so voids and other
+    // devices' sales appear everywhere), each table filtered by its own cursor.
     if (route === 'pull' && event.httpMethod === 'GET') {
-      const since = Number((event.queryStringParameters && event.queryStringParameters.since) || 0);
-      const pick = async (t) => (await db.from(t).select('*').gt('seq', since).order('seq')).data || [];
+      const qp = event.queryStringParameters || {};
+      const legacy = Number(qp.since || 0);
+      const cur = (name) => Number(qp[name + '_since'] != null ? qp[name + '_since'] : legacy) || 0;
+      const pick = async (t) => (await db.from(t).select('*').gt('seq', cur(t)).order('seq')).data || [];
       const tenants = await pick('tenants');
       const products = await pick('products');
       const variations = await pick('variations');
       const staff = await pick('staff');
-      const maxSeq = [...tenants, ...products, ...variations, ...staff]
-        .reduce((m, r) => Math.max(m, r.seq || 0), since);
-      return json(200, { cursor: maxSeq, tenants, products, variations, staff });
+      const sales = await pick('sales');
+      const sale_items = await pick('sale_items');
+      return json(200, { tenants, products, variations, staff, sales, sale_items });
     }
 
     return json(404, { error: 'not found', path });

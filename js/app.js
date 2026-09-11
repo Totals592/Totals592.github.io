@@ -46,7 +46,7 @@
       cart.push({
         variation_id: v.id, product_id: p.id,
         name: p.name + (v.name && v.name !== 'Default' ? ' · ' + v.name : ''),
-        sku: v.sku, unit_price: Config.effectivePrice(v), qty: 1,
+        sku: v.sku, unit_price: Config.effectivePrice(v), list_price: Number(v.price) || 0, qty: 1,
         track_stock: !!v.track_stock, stock: v.stock
       });
     }
@@ -346,9 +346,10 @@
 
     const items = cart.map((c) => {
       const id = DB.uid('si');
-      DB.run(`INSERT INTO sale_items(id,sale_id,tenant_id,product_id,variation_id,name,sku,qty,unit_price,line_total)
-              VALUES(?,?,?,?,?,?,?,?,?,?)`,
-        [id, saleId, t.id, c.product_id, c.variation_id, c.name, c.sku, c.qty, c.unit_price, c.unit_price * c.qty]);
+      const listPrice = Number(c.list_price) || c.unit_price;
+      DB.run(`INSERT INTO sale_items(id,sale_id,tenant_id,product_id,variation_id,name,sku,qty,unit_price,list_price,line_total)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+        [id, saleId, t.id, c.product_id, c.variation_id, c.name, c.sku, c.qty, c.unit_price, listPrice, c.unit_price * c.qty]);
       // Real-time stock decrement.
       if (c.track_stock) {
         DB.run('UPDATE variations SET stock = stock - ?, updated_at = ? WHERE id = ?', [c.qty, now, c.variation_id]);
@@ -357,7 +358,7 @@
       // Include the id so the cloud stores line items with the SAME id — this
       // prevents duplicates when the origin device pulls its own sale back.
       return { id, tenant_id: t.id, product_id: c.product_id, variation_id: c.variation_id,
-               name: c.name, sku: c.sku, qty: c.qty, unit_price: c.unit_price, line_total: c.unit_price * c.qty };
+               name: c.name, sku: c.sku, qty: c.qty, unit_price: c.unit_price, list_price: listPrice, line_total: c.unit_price * c.qty };
     });
 
     const saleRow = {
@@ -521,6 +522,7 @@
             <option value="amount" ${v.discount_type === 'amount' ? 'selected' : ''}>Amount off</option>
           </select></div>
           <div><label>Discount value</label><input data-v="discount_value" type="number" step="0.01" min="0" value="${v.discount_value || 0}"></div>
+          <div><label>Expiry date</label><input data-v="expiry_date" type="date" value="${esc(v.expiry_date || '')}"></div>
           <div><label>Track stock</label><select data-v="track_stock">
             <option value="1" ${v.track_stock ? 'selected' : ''}>Yes</option>
             <option value="0" ${!v.track_stock ? 'selected' : ''}>No (service)</option>
@@ -623,6 +625,7 @@
           low_stock_threshold: parseFloat(g('low_stock_threshold')) || 0,
           supplier_id: g('supplier_id') || null,
           discount_type: g('discount_type') || 'none', discount_value: parseFloat(g('discount_value')) || 0,
+          expiry_date: g('expiry_date') || null,
           active: 1
         };
       });
@@ -660,14 +663,14 @@
       const keptIds = [];
       collected.forEach((v) => {
         if (v.id) {
-          DB.run(`UPDATE variations SET name=?,sku=?,barcode=?,price=?,cost=?,stock=?,track_stock=?,low_stock_threshold=?,supplier_id=?,discount_type=?,discount_value=?,active=1,updated_at=? WHERE id=?`,
-            [v.name, v.sku, v.barcode, v.price, v.cost, v.stock, v.track_stock, v.low_stock_threshold, v.supplier_id, v.discount_type, v.discount_value, now, v.id]);
+          DB.run(`UPDATE variations SET name=?,sku=?,barcode=?,price=?,cost=?,stock=?,track_stock=?,low_stock_threshold=?,supplier_id=?,discount_type=?,discount_value=?,expiry_date=?,active=1,updated_at=? WHERE id=?`,
+            [v.name, v.sku, v.barcode, v.price, v.cost, v.stock, v.track_stock, v.low_stock_threshold, v.supplier_id, v.discount_type, v.discount_value, v.expiry_date, now, v.id]);
           keptIds.push(v.id);
         } else {
           const vid = DB.uid('var');
-          DB.run(`INSERT INTO variations(id,product_id,tenant_id,name,sku,barcode,price,cost,stock,track_stock,low_stock_threshold,supplier_id,discount_type,discount_value,active,updated_at,created_at)
-                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-            [vid, productId, tid, v.name, v.sku, v.barcode, v.price, v.cost, v.stock, v.track_stock, v.low_stock_threshold, v.supplier_id, v.discount_type, v.discount_value, 1, now, now]);
+          DB.run(`INSERT INTO variations(id,product_id,tenant_id,name,sku,barcode,price,cost,stock,track_stock,low_stock_threshold,supplier_id,discount_type,discount_value,expiry_date,active,updated_at,created_at)
+                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            [vid, productId, tid, v.name, v.sku, v.barcode, v.price, v.cost, v.stock, v.track_stock, v.low_stock_threshold, v.supplier_id, v.discount_type, v.discount_value, v.expiry_date, 1, now, now]);
           keptIds.push(vid);
         }
       });
@@ -707,6 +710,48 @@
       Sync.queue('stock', vid, 'set', { stock: newStock }, v.tenant_id);
       DB.persistNow(); closeModal(); renderInventory(); renderPOS(); toast('Stock updated', 'ok');
     });
+  }
+
+  // Show every stocked item whose expiry date is within one month (or already
+  // past). Helps a shop pull or discount goods before they go bad.
+  function expiringModal() {
+    const tid = Config.activeTenantId();
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const soon = new Date(today.getTime()); soon.setDate(soon.getDate() + 30);
+    const rows = DB.all(`
+      SELECT v.*, p.name AS product_name FROM variations v
+      JOIN products p ON p.id = v.product_id
+      WHERE v.tenant_id = ? AND v.active = 1 AND v.expiry_date IS NOT NULL AND v.expiry_date != ''
+      ORDER BY v.expiry_date`, [tid])
+      .map((r) => ({ ...r, exp: new Date(r.expiry_date + 'T00:00:00') }))
+      .filter((r) => !isNaN(r.exp) && r.exp <= soon)
+      .map((r) => {
+        const days = Math.round((r.exp - today) / 864e5);
+        return { ...r, days };
+      });
+
+    openModal(`
+      <header><h3>⏰ Expiring within 1 month</h3><button class="x" data-close>×</button></header>
+      <div class="body">
+        <p class="muted">Items with an expiry date on or before ${esc(Config.todayKey(soon))}.</p>
+        <div class="table-wrap"><table class="data">
+          <thead><tr><th>Product</th><th>SKU</th><th>Stock</th><th>Expiry</th><th>Status</th></tr></thead>
+          <tbody>${rows.map((r) => {
+            const label = r.days < 0 ? `<span class="badge low">Expired ${-r.days}d ago</span>`
+              : r.days === 0 ? '<span class="badge low">Expires today</span>'
+              : `<span class="badge ${r.days <= 7 ? 'low' : ''}">${r.days} day${r.days === 1 ? '' : 's'} left</span>`;
+            return `<tr>
+              <td>${esc(r.product_name)} ${esc(r.name && r.name !== 'Default' ? '· ' + r.name : '')}</td>
+              <td>${esc(r.sku || '')}</td>
+              <td>${r.track_stock ? r.stock : '∞'}</td>
+              <td>${esc(r.expiry_date)}</td>
+              <td>${label}</td>
+            </tr>`;
+          }).join('') || '<tr><td colspan="5" class="muted center">Nothing expiring within a month. 🎉</td></tr>'}</tbody>
+        </table></div>
+      </div>
+      <div class="foot"><button class="btn ghost" data-close>Close</button></div>`, true);
+    $$('[data-close]', $('#modal')).forEach((b) => b.addEventListener('click', closeModal));
   }
 
   /* ---------------- Suppliers ---------------- */
@@ -793,9 +838,16 @@
       .filter((s) => !isVoid(s));
     const lbl = filterActive ? 'Selected' : 'Today';
 
-    // Money figures are masked until the manager explicitly reveals them.
-    $('#repShowFigures').checked = repShowFigures;
-    $('#repPrivacyHint').textContent = (repShowFigures ? 'Figures are visible.' : 'Figures are hidden by default for privacy.')
+    // Only managers/admins (or cashiers a manager has granted) may reveal money
+    // figures. For everyone else the toggle is disabled and figures stay hidden.
+    const allowFigures = canViewSales();
+    const showToggle = $('#repShowFigures');
+    if (!allowFigures) repShowFigures = false;
+    showToggle.checked = repShowFigures;
+    showToggle.disabled = !allowFigures;
+    $('#repPrivacyHint').textContent = (!allowFigures
+        ? 'Sales & income figures are visible to managers only.'
+        : (repShowFigures ? 'Figures are visible.' : 'Figures are hidden by default for privacy.'))
       + (remoteOn ? '' : ' Showing this device only (multi-device view is off).');
     const cash = (v) => repShowFigures ? money(v) : '••••••';
 
@@ -806,6 +858,25 @@
     const ab = $('#repAnalyticsBtn');
     if (ab) { ab.disabled = !analyticsOn; ab.classList.toggle('brand', analyticsOn); ab.classList.toggle('ghost', !analyticsOn);
       ab.textContent = analyticsOn ? '📈 Report Analytics' : '📈 Report Analytics (off)'; }
+
+    // Optional daily starting cash (float) + expected cash in this register's
+    // drawer today. Starting cash is device-local, per shop, per calendar day.
+    const dayKey = Config.todayKey();
+    const startKey = 'start_cash_' + tid + '_' + dayKey;
+    const cashCard = $('#repCashCard');
+    if (cashCard) {
+      cashCard.style.display = allowFigures ? '' : 'none';
+      if (allowFigures) {
+        const startVal = DB.getSetting(startKey);
+        $('#repStartCash').value = (startVal == null) ? '' : startVal;
+        const mineDev = Config.deviceId();
+        const todayCash = DB.all('SELECT total, created_at, status, origin_device FROM sales WHERE tenant_id = ?', [tid])
+          .filter((s) => (s.origin_device || '') === mineDev && new Date(s.created_at) >= today && (s.status || 'completed') !== 'voided')
+          .reduce((a, r) => a + (Number(r.total) || 0), 0);
+        const expected = (parseFloat(startVal) || 0) + todayCash;
+        $('#repExpectedCash').textContent = repShowFigures ? money(expected) : '••••••';
+      }
+    }
 
     $('#repKpis').innerHTML =
       kpi(cash(kpiSet.reduce((a, r) => a + r.total, 0)), lbl + ' sales') +
@@ -927,9 +998,13 @@
       }
     });
     DB.run("UPDATE sales SET status='voided' WHERE id=?", [saleId]);
-    // Push the voided status up (upsert of the sale record with status voided).
-    Sync.queue('sale', saleId, 'update',
-      { sale: { id: saleId, tenant_id: s.tenant_id, status: 'voided' } }, s.tenant_id);
+    // Push the WHOLE sale record with status voided. Sending the full row (not
+    // just the status) means the cloud upsert always ends up with a complete,
+    // correct sale even if this device is the first to create it there, and the
+    // server bumps the row's sync sequence so EVERY other device re-pulls it and
+    // sees the void. (See the bump_seq trigger in docs/MIGRATION-SUPABASE.md.)
+    const full = DB.get('SELECT * FROM sales WHERE id = ?', [saleId]);
+    Sync.queue('sale', saleId, 'update', { sale: Object.assign({}, full, { status: 'voided' }) }, s.tenant_id);
     DB.persistNow();
     if (!silent) { renderReports(); renderPOS(); updateSyncPill(); toast('Order voided', 'ok'); }
     return s;
@@ -949,7 +1024,7 @@
       const v = it.variation_id ? DB.get('SELECT * FROM variations WHERE id = ?', [it.variation_id]) : null;
       cart.push({
         variation_id: it.variation_id, product_id: it.product_id, name: it.name, sku: it.sku,
-        unit_price: it.unit_price, qty: it.qty,
+        unit_price: it.unit_price, list_price: (it.list_price != null ? it.list_price : it.unit_price), qty: it.qty,
         track_stock: v ? !!v.track_stock : false, stock: v ? v.stock : 0
       });
     });
@@ -1103,6 +1178,18 @@
     const r = Config.currentRole();
     return r === 'manager' || r === 'admin';
   }
+  // Cashiers only see sales/income figures if a manager granted them access.
+  function canViewSales() {
+    if (canManage()) return true;
+    const s = Config.currentSession();
+    return !!(s && s.can_view_sales);
+  }
+  // Cashiers only reach the Inventory tab if a manager granted them access.
+  function canManageInventory() {
+    if (canManage()) return true;
+    const s = Config.currentSession();
+    return !!(s && s.can_manage_inventory);
+  }
 
   // Save a downscaled logo for the active shop (managers only).
   async function saveLogo(file) {
@@ -1118,19 +1205,18 @@
     toast(dataUrl ? 'Logo updated' : 'Logo removed', 'ok');
   }
 
-  // Hide manager-only tabs for cashiers; keep the current view valid.
+  // Hide manager-only tabs for cashiers; keep the current view valid. A cashier
+  // may be granted Inventory access by a manager (per-staff permission).
   function applyRoleGating() {
-    const role = Config.currentRole();
-    const isManager = role === 'manager' || role === 'admin';
+    const isManager = canManage();
+    const allow = { inventory: isManager || canManageInventory(), suppliers: isManager, settings: isManager };
     MANAGER_TABS.forEach((v) => {
       const tab = document.querySelector('.tab[data-view="' + v + '"]');
-      if (tab) tab.classList.toggle('hidden-role', !isManager);
+      if (tab) tab.classList.toggle('hidden-role', !allow[v]);
     });
     // Admin tab stays visible for everyone (still gated by the device PIN).
-    if (!isManager) {
-      const active = document.querySelector('.tab.active');
-      if (active && MANAGER_TABS.includes(active.dataset.view)) switchView('pos');
-    }
+    const active = document.querySelector('.tab.active');
+    if (active && MANAGER_TABS.includes(active.dataset.view) && !allow[active.dataset.view]) switchView('pos');
     // The per-shop Staff card is manager-only.
     const staffCard = $('#staffCard'); if (staffCard) staffCard.style.display = isManager ? '' : 'none';
   }
@@ -1177,7 +1263,8 @@
     if (!staff) { err.textContent = 'Unknown user for this shop.'; return; }
     const hash = await Config.hashPin(pin, staff.salt);
     if (hash !== staff.pin_hash) { err.textContent = 'Incorrect PIN.'; return; }
-    signInAs({ tenant_id: tenant.id, staff_id: staff.id, name: staff.name, role: staff.role });
+    signInAs({ tenant_id: tenant.id, staff_id: staff.id, name: staff.name, role: staff.role,
+      can_view_sales: staff.can_view_sales ? 1 : 0, can_manage_inventory: staff.can_manage_inventory ? 1 : 0 });
   }
 
   function signInAs(session) {
@@ -1215,6 +1302,13 @@
     if (s.admin) { Config.setActiveTenant(s.tenant_id); return true; } // device-admin override
     const staff = DB.get('SELECT * FROM staff WHERE id = ? AND active = 1', [s.staff_id]);
     if (!staff) return false;
+    // Refresh role/name/permissions from the (possibly synced-down) staff row so
+    // a manager's changes take effect on the cashier's next start.
+    Config.setSession(Object.assign({}, s, {
+      name: staff.name, role: staff.role,
+      can_view_sales: staff.can_view_sales ? 1 : 0,
+      can_manage_inventory: staff.can_manage_inventory ? 1 : 0
+    }));
     Config.setActiveTenant(s.tenant_id);
     return true;
   }
@@ -1224,12 +1318,15 @@
     const salt = Config.randomSalt();
     const hash = await Config.hashPin(d.pin, salt);
     const now = DB.nowISO(); const id = DB.uid('stf');
-    DB.run(`INSERT INTO staff(id,tenant_id,name,username,pin_hash,salt,role,active,updated_at,created_at)
-            VALUES(?,?,?,?,?,?,?,1,?,?)`,
-      [id, tenantId, d.name, d.username.toLowerCase(), hash, salt, d.role, now, now]);
+    const cvs = d.can_view_sales ? 1 : 0;
+    const cmi = d.can_manage_inventory ? 1 : 0;
+    DB.run(`INSERT INTO staff(id,tenant_id,name,username,pin_hash,salt,role,can_view_sales,can_manage_inventory,active,updated_at,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,1,?,?)`,
+      [id, tenantId, d.name, d.username.toLowerCase(), hash, salt, d.role, cvs, cmi, now, now]);
     Sync.queue('staff', id, 'create',
       { id, tenant_id: tenantId, name: d.name, username: d.username.toLowerCase(),
-        pin_hash: hash, salt, role: d.role, active: 1, updated_at: now, created_at: now }, tenantId);
+        pin_hash: hash, salt, role: d.role, can_view_sales: cvs, can_manage_inventory: cmi,
+        active: 1, updated_at: now, created_at: now }, tenantId);
     return id;
   }
 
@@ -1268,30 +1365,43 @@
         </div>
         <label>${editing ? 'New PIN (leave blank to keep current)' : 'PIN'}</label>
         <input id="stPin" type="password" inputmode="numeric" placeholder="${editing ? '••••' : 'PIN'}">
+        <div id="stPerms" style="margin-top:12px;${s.role === 'manager' ? 'display:none' : ''}">
+          <p class="muted" style="margin-bottom:6px">Cashier permissions (managers always have full access)</p>
+          <label class="switch"><input type="checkbox" id="stViewSales" ${s.can_view_sales ? 'checked' : ''}> Can view sales &amp; income figures</label>
+          <label class="switch"><input type="checkbox" id="stManageInv" ${s.can_manage_inventory ? 'checked' : ''}> Can add &amp; update inventory</label>
+        </div>
       </div>
       <div class="foot"><button class="btn ghost" data-close>Cancel</button><button class="btn brand" id="stSave">Save</button></div>`);
     const m = $('#modal');
     $$('[data-close]', m).forEach((b) => b.addEventListener('click', closeModal));
+    // Cashier-only permissions: hide them when Manager is selected.
+    $('#stRole', m).addEventListener('change', (e) => {
+      const perms = $('#stPerms', m); if (perms) perms.style.display = e.target.value === 'manager' ? 'none' : '';
+    });
     $('#stSave', m).addEventListener('click', async () => {
       const name = $('#stName', m).value.trim();
       const user = $('#stUser', m).value.trim().toLowerCase();
       const role = $('#stRole', m).value;
       const pin = $('#stPin', m).value;
+      // Managers implicitly have every permission; store the grants only for cashiers.
+      const cvs = role === 'manager' ? 0 : ($('#stViewSales', m) && $('#stViewSales', m).checked ? 1 : 0);
+      const cmi = role === 'manager' ? 0 : ($('#stManageInv', m) && $('#stManageInv', m).checked ? 1 : 0);
       if (!name || (!editing && !user)) { toast('Name and username required', 'err'); return; }
       const now = DB.nowISO();
       if (editing) {
         let hash = s.pin_hash, salt = s.salt;
         if (pin) { salt = Config.randomSalt(); hash = await Config.hashPin(pin, salt); }
-        DB.run('UPDATE staff SET name=?,role=?,pin_hash=?,salt=?,active=1,updated_at=? WHERE id=?',
-          [name, role, hash, salt, now, staffId]);
+        DB.run('UPDATE staff SET name=?,role=?,can_view_sales=?,can_manage_inventory=?,pin_hash=?,salt=?,active=1,updated_at=? WHERE id=?',
+          [name, role, cvs, cmi, hash, salt, now, staffId]);
         Sync.queue('staff', staffId, 'update',
-          { id: staffId, tenant_id: s.tenant_id, name, role, pin_hash: hash, salt, active: 1, updated_at: now }, s.tenant_id);
+          { id: staffId, tenant_id: s.tenant_id, name, role, can_view_sales: cvs, can_manage_inventory: cmi,
+            pin_hash: hash, salt, active: 1, updated_at: now }, s.tenant_id);
       } else {
         // Enforce unique username within the tenant.
         const dupe = DB.get('SELECT id FROM staff WHERE tenant_id=? AND lower(username)=? AND active=1', [tenantId, user]);
         if (dupe) { toast('That username is taken', 'err'); return; }
         if (!pin) { toast('PIN required', 'err'); return; }
-        await createStaff(tenantId, { name, username: user, pin, role });
+        await createStaff(tenantId, { name, username: user, pin, role, can_view_sales: cvs, can_manage_inventory: cmi });
       }
       DB.persistNow(); closeModal();
       if (after) after(); else renderStaff(tenantId);
@@ -1403,7 +1513,7 @@
 
     add('Products', DB.all(`SELECT p.name AS Product, p.category AS Category, v.name AS Variation,
         v.sku AS SKU, v.barcode AS Barcode, v.price AS Price, v.cost AS Cost, v.stock AS Stock,
-        v.low_stock_threshold AS LowAt, s.name AS Supplier
+        v.low_stock_threshold AS LowAt, v.expiry_date AS Expiry, s.name AS Supplier
       FROM variations v JOIN products p ON p.id=v.product_id
       LEFT JOIN suppliers s ON s.id=v.supplier_id
       WHERE v.tenant_id=? AND v.active=1 ORDER BY p.name, v.price`, [tid]));
@@ -1499,6 +1609,7 @@
       }
     }));
     $('#addProductBtn').addEventListener('click', () => productModal(null));
+    $('#expiringBtn').addEventListener('click', expiringModal);
     $('#invSearch').addEventListener('input', (e) => { invFilter = e.target.value; renderInventory(); });
     $('#invTable').addEventListener('click', (e) => {
       const ed = e.target.closest('[data-editprod]'); const rs = e.target.closest('[data-restock]');
@@ -1523,6 +1634,16 @@
     $('#repTo').addEventListener('change', (e) => { repTo = e.target.value; renderReports(); });
     $('#repSearch').addEventListener('input', (e) => { repSearch = e.target.value; renderReports(); });
     $('#repClearFilter').addEventListener('click', () => { repFrom = repTo = repSearch = ''; renderReports(); });
+    // Optional daily starting cash (stored per shop, per day, on this device).
+    $('#repStartCash').addEventListener('change', (e) => {
+      if (!canViewSales()) return;
+      const key = 'start_cash_' + Config.activeTenantId() + '_' + Config.todayKey();
+      const v = e.target.value.trim();
+      if (v === '') DB.run('DELETE FROM settings WHERE key = ?', [key]);
+      else DB.setSetting(key, v);
+      DB.persistNow();
+      renderReports();
+    });
     $('#repAnalyticsBtn').addEventListener('click', () => {
       const t = Config.activeTenant();
       if (!t || t.analytics_enabled !== 1) { toast('Report analytics is off — an administrator enables it per shop.', 'err'); return; }
@@ -1682,6 +1803,16 @@
       setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     });
     $('#backupXlsxBtn').addEventListener('click', exportWorkbook);
+    $('#weeklyBackupBtn').addEventListener('click', async () => {
+      const b = await DB.getWeeklyBackup();
+      if (!b || !b.bytes) { toast('No weekly backup saved yet — it is created automatically once a week.', 'err'); return; }
+      const blob = new Blob([b.bytes], { type: 'application/octet-stream' });
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+      const stamp = (b.at ? new Date(b.at) : new Date()).toISOString().slice(0, 10);
+      a.download = 'totals-pos-weekly-' + stamp + '.sqlite'; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      toast('Weekly backup downloaded', 'ok');
+    });
     $('#restoreBtn').addEventListener('click', () => $('#restoreFile').click());
     $('#restoreFile').addEventListener('change', async (e) => {
       const f = e.target.files[0]; if (!f) return;
@@ -1755,6 +1886,8 @@
   /* ---------------- Boot ---------------- */
   async function boot() {
     await DB.init();
+    // Keep a rolling weekly snapshot in device storage (overwrites last week's).
+    DB.autoBackupIfDue();
     wire();
     updateNetPill();
     updateSyncPill();
