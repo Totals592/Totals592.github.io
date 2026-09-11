@@ -1524,6 +1524,58 @@
     $$('[data-astaffdel]', m).forEach((b) => b.addEventListener('click', () => deleteStaff(b.dataset.astaffdel, rerender)));
   }
 
+  /* ---------------- Sync diagnostics ---------------- */
+  // Compares this device's shops against the server's, and shows the pending
+  // outbox, so we can see whether a new shop failed to UPLOAD (stuck in the
+  // outbox / missing on server) or failed to DOWNLOAD (on server, not here).
+  async function runSyncDiagnostics() {
+    const out = $('#syncDiagOut'); if (!out) return;
+    out.textContent = 'Running diagnostics…';
+    const L = [];
+    const base = Config.apiBase();
+    L.push('API base: ' + (base || '(offline / not set)'));
+    L.push('Online: ' + navigator.onLine + '   Configured: ' + Sync.configured());
+    L.push('Cursors: ' + (DB.getSetting('sync_cursors') || '(none yet)'));
+    L.push('Last sync: ' + (DB.getSetting('last_sync_at') || 'never'));
+
+    const pend = DB.get('SELECT COUNT(*) AS n FROM sync_queue');
+    const q = DB.all('SELECT entity, op, COUNT(*) AS n, MAX(attempts) AS maxa FROM sync_queue GROUP BY entity, op ORDER BY maxa DESC, entity');
+    L.push('');
+    L.push('Pending outbox: ' + ((pend && pend.n) || 0) + ' item(s)');
+    if (!q.length) L.push('  (empty — nothing waiting to upload)');
+    q.forEach((r) => L.push('  ' + r.entity + '/' + r.op + '  ×' + r.n + '   retries: ' + r.maxa
+      + (r.maxa >= 3 ? '  ← server keeps rejecting this' : '')));
+
+    const localT = DB.all('SELECT name, status FROM tenants ORDER BY name');
+    L.push('');
+    L.push('Shops on THIS device (' + localT.length + '):');
+    localT.forEach((t) => L.push('  • ' + t.name + (t.status && t.status !== 'active' ? ' [' + t.status + ']' : '')));
+
+    if (base) {
+      try {
+        const res = await fetch(base + '/api/pull?since=0', { headers: { 'Content-Type': 'application/json' }, cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const j = await res.json();
+        const st = Array.isArray(j.tenants) ? j.tenants : [];
+        L.push('');
+        L.push('Shops on the SERVER (' + st.length + '):');
+        st.forEach((t) => L.push('  • ' + (t.name || '(no name)') + (t.status && t.status !== 'active' ? ' [' + t.status + ']' : '')));
+        const norm = (n) => String(n || '').trim().toLowerCase();
+        const sNames = new Set(st.map((t) => norm(t.name)));
+        const lNames = new Set(localT.map((t) => norm(t.name)));
+        const notOnServer = localT.filter((t) => !sNames.has(norm(t.name)) && t.status !== 'deleted');
+        const notHere = st.filter((t) => !lNames.has(norm(t.name)));
+        L.push('');
+        if (notOnServer.length) L.push('⚠ Here but NOT on server (UPLOAD failing): ' + notOnServer.map((t) => t.name).join(', '));
+        if (notHere.length) L.push('⚠ On server but NOT here (DOWNLOAD failing): ' + notHere.map((t) => t.name || '(no name)').join(', '));
+        if (!notOnServer.length && !notHere.length) L.push('✓ Shops match between this device and the server.');
+      } catch (e) {
+        L.push(''); L.push('✗ Could not read the server: ' + ((e && e.message) || e));
+      }
+    }
+    out.textContent = L.join('\n');
+  }
+
   /* ---------------- Status pills ---------------- */
   function updateNetPill() {
     const on = navigator.onLine;
@@ -1852,6 +1904,13 @@
       }
     });
     $('#syncNowBtn').addEventListener('click', () => { if (!Sync.configured()) { toast('Set an API base URL first', 'err'); return; } Sync.run(true); });
+    $('#syncDiagBtn').addEventListener('click', runSyncDiagnostics);
+    $('#pullAllBtn').addEventListener('click', async () => {
+      if (!Sync.configured()) { toast('Set an API base URL first', 'err'); return; }
+      toast('Refreshing everything from the cloud…');
+      try { await Sync.pullAll(); } catch (e) {}
+      renderAdmin(); runSyncDiagnostics(); toast('Full refresh done', 'ok');
+    });
     $('#backupBtn').addEventListener('click', () => {
       const blob = new Blob([DB.export()], { type: 'application/octet-stream' });
       const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
