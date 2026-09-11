@@ -111,15 +111,20 @@ create table if not exists sales (
   cashier text, vat_inclusive int, vat_rate numeric,
   service_charge numeric default 0, service_charge_rate numeric default 0,
   currency text, status text default 'completed', synced int default 1,
-  created_at timestamptz, received_at timestamptz default now()
+  created_at timestamptz, received_at timestamptz default now(),
+  updated_at timestamptz, seq bigserial
 );
 
 create table if not exists sale_items (
   id text primary key, sale_id text not null references sales(id),
   tenant_id text not null references tenants(id),
   product_id text, variation_id text, name text, sku text,
-  qty numeric, unit_price numeric, line_total numeric
+  qty numeric, unit_price numeric, line_total numeric,
+  updated_at timestamptz, seq bigserial
 );
+
+create index if not exists idx_sales_seq on sales(seq);
+create index if not exists idx_sale_items_seq on sale_items(seq);
 
 create index if not exists idx_var_tenant on variations(tenant_id);
 create index if not exists idx_prod_tenant on products(tenant_id);
@@ -200,8 +205,9 @@ serve(async (req) => {
         }
         else if (ch.entity === "sale") {
           if (p.sale) await db.from("sales").upsert(p.sale);
+          // Use the client's item id (falls back to a uuid) so replays don't duplicate lines.
           if (p.items) for (const it of p.items)
-            await db.from("sale_items").upsert({ id: crypto.randomUUID(), sale_id: ch.entity_id, ...it });
+            await db.from("sale_items").upsert({ id: it.id || crypto.randomUUID(), sale_id: ch.entity_id, ...it });
         }
         applied.push(ch.id);
       } catch (_) { /* leave un-applied; the register retries */ }
@@ -209,18 +215,20 @@ serve(async (req) => {
     return json({ applied });
   }
 
-  // PULL: registers download rows changed since their cursor.
+  // PULL: registers download rows changed since their per-table cursor.
   if (url.pathname.endsWith("/pull") && req.method === "GET") {
-    const since = Number(url.searchParams.get("since") || 0);
+    const qp = url.searchParams;
+    const legacy = Number(qp.get("since") || 0);
+    const cur = (name: string) => Number(qp.get(name + "_since") ?? legacy) || 0;
     const pick = async (t: string) =>
-      (await db.from(t).select("*").gt("seq", since).order("seq")).data || [];
+      (await db.from(t).select("*").gt("seq", cur(t)).order("seq")).data || [];
     const tenants = await pick("tenants");
     const products = await pick("products");
     const variations = await pick("variations");
     const staff = await pick("staff");
-    const maxSeq = [...tenants, ...products, ...variations, ...staff]
-      .reduce((m, r: any) => Math.max(m, r.seq || 0), since);
-    return json({ cursor: maxSeq, tenants, products, variations, staff });
+    const sales = await pick("sales");           // sales now replicate to every device
+    const sale_items = await pick("sale_items");
+    return json({ tenants, products, variations, staff, sales, sale_items });
   }
 
   return json({ error: "not found" }, 404);

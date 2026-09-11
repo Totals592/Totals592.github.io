@@ -77,16 +77,50 @@ window.Sync = (function () {
   }
 
   /* ---------- PULL: apply remote changes ---------- */
+  // Per-table cursors (each table has its own bigserial), stored as JSON. This
+  // is robust and also pulls SALES + SALE_ITEMS so every device sees the whole
+  // shop, not just what it rang up itself.
+  const CURSOR_KEYS = ['tenants', 'products', 'variations', 'staff', 'sales', 'sale_items'];
+  function getCursors() {
+    let c = {}; try { c = JSON.parse(DB.getSetting('sync_cursors') || '{}'); } catch (e) {}
+    // Migrate the old single cursor to the catalogue tables.
+    const legacy = Number(DB.getSetting('sync_cursor') || 0);
+    CURSOR_KEYS.forEach((k) => { if (c[k] == null) c[k] = (k === 'sales' || k === 'sale_items') ? 0 : legacy; });
+    return c;
+  }
+  function maxSeq(rows, start) {
+    return (rows || []).reduce((m, r) => Math.max(m, Number(r.seq) || 0), start || 0);
+  }
+
   async function pull() {
-    const since = DB.getSetting('sync_cursor') || '';
-    const out = await apiFetch('/api/pull?since=' + encodeURIComponent(since), { method: 'GET' });
+    const cur = getCursors();
+    // `since` keeps the old single-cursor backend working; the *_since params
+    // drive the new per-table backend. Whichever the server understands, the
+    // client advances cursors from the seq values on the rows it gets back.
+    const since = Math.max(cur.tenants, cur.products, cur.variations, cur.staff);
+    const qs = new URLSearchParams({
+      since: String(since),
+      tenants_since: cur.tenants, products_since: cur.products, variations_since: cur.variations,
+      staff_since: cur.staff, sales_since: cur.sales, sale_items_since: cur.sale_items
+    });
+    const out = await apiFetch('/api/pull?' + qs.toString(), { method: 'GET' });
     (out.tenants || []).forEach(upsertTenant);
     (out.products || []).forEach(upsertProduct);
     (out.variations || []).forEach(upsertVariation);
     (out.staff || []).forEach(upsertStaff);
-    if (out.cursor) DB.setSetting('sync_cursor', out.cursor);
-    return { pulled: (out.tenants || []).length + (out.products || []).length +
-                     (out.variations || []).length + (out.staff || []).length };
+    (out.sales || []).forEach(upsertSale);
+    (out.sale_items || []).forEach(upsertSaleItem);
+
+    const next = {
+      tenants: maxSeq(out.tenants, cur.tenants),
+      products: maxSeq(out.products, cur.products),
+      variations: maxSeq(out.variations, cur.variations),
+      staff: maxSeq(out.staff, cur.staff),
+      sales: maxSeq(out.sales, cur.sales),
+      sale_items: maxSeq(out.sale_items, cur.sale_items)
+    };
+    DB.setSetting('sync_cursors', JSON.stringify(next));
+    return { pulled: CURSOR_KEYS.reduce((n, k) => n + ((out[k] || []).length), 0) };
   }
 
   // Upserts apply "last write wins" using updated_at so remote edits win only
@@ -147,6 +181,31 @@ window.Sync = (function () {
         salt=excluded.salt,role=excluded.role,active=excluded.active,updated_at=excluded.updated_at`,
       [s.id, s.tenant_id, s.name, (s.username || '').toLowerCase(), s.pin_hash, s.salt,
        s.role || 'cashier', s.active ?? 1, s.updated_at || DB.nowISO(), s.created_at || DB.nowISO()]);
+  }
+  // Sales replicate to every device (overwrite by id; the cloud copy wins, which
+  // also propagates voids). Marked synced since they came from the cloud.
+  function upsertSale(s) {
+    DB.run(`INSERT INTO sales(id,tenant_id,receipt_no,order_no,order_date,subtotal,vat_amount,total,
+        cash_received,change_due,item_count,cashier,vat_inclusive,vat_rate,service_charge,service_charge_rate,
+        currency,status,synced,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)
+      ON CONFLICT(id) DO UPDATE SET receipt_no=excluded.receipt_no,order_no=excluded.order_no,order_date=excluded.order_date,
+        subtotal=excluded.subtotal,vat_amount=excluded.vat_amount,total=excluded.total,cash_received=excluded.cash_received,
+        change_due=excluded.change_due,item_count=excluded.item_count,cashier=excluded.cashier,
+        vat_inclusive=excluded.vat_inclusive,vat_rate=excluded.vat_rate,service_charge=excluded.service_charge,
+        service_charge_rate=excluded.service_charge_rate,currency=excluded.currency,status=excluded.status,synced=1`,
+      [s.id, s.tenant_id, s.receipt_no, s.order_no, s.order_date, s.subtotal, s.vat_amount, s.total,
+       s.cash_received, s.change_due, s.item_count, s.cashier, s.vat_inclusive, s.vat_rate,
+       s.service_charge ?? 0, s.service_charge_rate ?? 0, s.currency, s.status || 'completed',
+       s.created_at || DB.nowISO()]);
+  }
+  function upsertSaleItem(it) {
+    DB.run(`INSERT INTO sale_items(id,sale_id,tenant_id,product_id,variation_id,name,sku,qty,unit_price,line_total)
+      VALUES(?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET sale_id=excluded.sale_id,name=excluded.name,sku=excluded.sku,
+        qty=excluded.qty,unit_price=excluded.unit_price,line_total=excluded.line_total`,
+      [it.id, it.sale_id, it.tenant_id, it.product_id, it.variation_id, it.name, it.sku,
+       it.qty, it.unit_price, it.line_total]);
   }
 
   /* ---------- Orchestration ---------- */

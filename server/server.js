@@ -111,8 +111,12 @@ function applyChange(ch) {
     }
     case 'sale': {
       const s = p.sale || {};
-      db.sales[ch.entity_id] = Object.assign({ id: ch.entity_id, received_at: nowISO() }, s);
-      (p.items || []).forEach((it) => { const id = uid('si'); db.sale_items[id] = Object.assign({ id, sale_id: ch.entity_id }, it); });
+      db.sales[ch.entity_id] = touch(Object.assign(db.sales[ch.entity_id] || { received_at: nowISO() }, { id: ch.entity_id }, s));
+      // Use the client-provided item id so replays don't duplicate line items.
+      (p.items || []).forEach((it) => {
+        const id = it.id || uid('si');
+        db.sale_items[id] = touch(Object.assign(db.sale_items[id] || {}, it, { id, sale_id: ch.entity_id }));
+      });
       break;
     }
     default: break;
@@ -156,13 +160,21 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { applied, low_stock: db.alerts.filter((a) => !a.resolved).length });
   }
 
-  // ---- Register pull (cursor based) ----
+  // ---- Register pull (per-table cursor based) ----
   if (p === '/api/pull' && req.method === 'GET') {
-    const since = Number(url.searchParams.get('since') || 0);
-    const pick = (map) => Object.values(map).filter((x) => (x.seq || 0) > since);
-    const tenants = pick(db.tenants), products = pick(db.products), variations = pick(db.variations), staff = pick(db.staff);
-    const cursor = db.seq;
-    return send(res, 200, { cursor, tenants, products, variations, staff });
+    const q = url.searchParams;
+    // Each table filtered by its own cursor (falls back to legacy ?since=).
+    const legacy = Number(q.get('since') || 0);
+    const cur = (name) => Number(q.get(name + '_since') != null ? q.get(name + '_since') : legacy) || 0;
+    const pick = (map, name) => Object.values(map).filter((x) => (x.seq || 0) > cur(name));
+    const tenants = pick(db.tenants, 'tenants');
+    const products = pick(db.products, 'products');
+    const variations = pick(db.variations, 'variations');
+    const staff = pick(db.staff, 'staff');
+    // Sales + line items now replicate to every device.
+    const salesArr = Object.values(db.sales).filter((x) => (x.seq || 0) > cur('sales'));
+    const itemsArr = Object.values(db.sale_items).filter((x) => (x.seq || 0) > cur('sale_items'));
+    return send(res, 200, { cursor: db.seq, tenants, products, variations, staff, sales: salesArr, sale_items: itemsArr });
   }
 
   // ---- Low-stock alerts (reordering) ----
