@@ -1648,6 +1648,145 @@
     toast('Excel workbook downloaded', 'ok');
   }
 
+  /* ---------------- Import past sales (backdated) ---------------- */
+  // A downloadable example so shop owners know the expected columns.
+  function downloadSalesTemplate() {
+    downloadCSV('totals-pos-sales-template.csv', [
+      ['Date', 'Receipt', 'Item', 'Qty', 'UnitPrice', 'Cashier'],
+      ['2026-08-01', 'INV-001', 'Espresso · Double', 2, 18, 'Ada'],
+      ['2026-08-01', 'INV-001', 'Meat Pie', 1, 15, 'Ada'],
+      ['2026-08-02', 'INV-002', 'Cappuccino', 1, 22, 'Kofi']
+    ]);
+  }
+
+  // Match an imported line name to an existing variation (best effort), so we
+  // can link product ids and optionally adjust stock.
+  function findVariationByName(tid, name) {
+    const n = String(name || '').trim().toLowerCase();
+    if (!n) return null;
+    const rows = DB.all(`SELECT v.*, p.name AS pname FROM variations v JOIN products p ON p.id=v.product_id
+                         WHERE v.tenant_id=? AND v.active=1`, [tid]);
+    return rows.find((r) => {
+      const full = (r.pname + (r.name && r.name !== 'Default' ? ' · ' + r.name : '')).toLowerCase();
+      return full === n || r.pname.toLowerCase() === n || (r.sku && String(r.sku).toLowerCase() === n);
+    }) || null;
+  }
+
+  function parseImportDate(v) {
+    if (v instanceof Date && !isNaN(v)) return v;
+    if (typeof v === 'number' && v > 0) { const d = new Date(Math.round((v - 25569) * 86400 * 1000)); return isNaN(d) ? null : d; }
+    const s = String(v || '').trim(); if (!s) return null;
+    let d = new Date(s); if (!isNaN(d)) return d;
+    const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/); // dd/mm/yyyy or dd-mm-yyyy
+    if (m) { let c = m[3]; if (c.length === 2) c = '20' + c; d = new Date(+c, (+m[2]) - 1, +m[1]); if (!isNaN(d)) return d; }
+    return null;
+  }
+
+  async function importSalesFile(file) {
+    if (typeof XLSX === 'undefined') { toast('Spreadsheet engine still loading — try again', 'err'); return; }
+    const t = Config.activeTenant();
+    const res = $('#importSalesResult'); res.style.color = ''; res.textContent = 'Reading file…';
+
+    let json;
+    try {
+      // Read CSV as UTF-8 text (so accents like "·" survive); Excel files are
+      // binary and read as an array.
+      const isCsv = /\.csv$/i.test(file.name) || file.type === 'text/csv';
+      const wb = isCsv
+        ? XLSX.read(await file.text(), { type: 'string' })
+        : XLSX.read(new Uint8Array(await file.arrayBuffer()), { type: 'array', cellDates: true });
+      json = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { raw: true, defval: '' });
+    } catch (e) { res.style.color = 'var(--danger)'; res.textContent = 'Could not read the file: ' + ((e && e.message) || e); return; }
+    if (!json.length) { res.style.color = 'var(--danger)'; res.textContent = 'No rows found in the file.'; return; }
+
+    const norm = (s) => String(s || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    const pick = (row, names) => { for (const k of Object.keys(row)) { if (names.includes(norm(k))) return row[k]; } return undefined; };
+
+    // Group rows into sales by Receipt (falling back to one sale per row).
+    const groups = new Map(); let skipped = 0;
+    json.forEach((r, i) => {
+      const name = String(pick(r, ['item', 'product', 'name', 'description', 'itemname']) || '').trim();
+      const d = parseImportDate(pick(r, ['date', 'saledate', 'datetime', 'time']));
+      if (!name || !d) { skipped++; return; }
+      const qty = Number(pick(r, ['qty', 'quantity', 'units'])) || 1;
+      let unit = Number(pick(r, ['unitprice', 'price', 'rate', 'unitcost']));
+      const total = Number(pick(r, ['total', 'linetotal', 'lineamount', 'amount']));
+      if ((!unit || isNaN(unit)) && total) unit = total / qty;
+      unit = Number(unit) || 0;
+      const rc = String(pick(r, ['receipt', 'receiptno', 'invoice', 'invoiceno', 'order', 'orderno', 'ref']) || '').trim();
+      const key = rc ? 'rc:' + rc : 'row:' + i;
+      if (!groups.has(key)) groups.set(key, { date: d, receipt: rc, cashier: String(pick(r, ['cashier', 'staff', 'served', 'seller']) || '').trim(), items: [] });
+      groups.get(key).items.push({ name, qty, unit });
+    });
+    if (!groups.size) { res.style.color = 'var(--danger)'; res.textContent = 'No usable rows (each needs at least a Date and Item).'; return; }
+
+    const syncCloud = $('#importSyncCloud').checked;
+    const adjustStock = $('#importAdjustStock').checked;
+    const rate = Number(t.vat_rate) || 0;
+    const vatOn = !!t.vat_enabled && rate > 0;
+    const inclusive = !!t.vat_inclusive;
+    const nowIso = DB.nowISO();
+    let salesCount = 0, itemsCount = 0, matched = 0;
+
+    groups.forEach((g) => {
+      if (!g.items.length) return;
+      const gross = g.items.reduce((s, it) => s + it.unit * it.qty, 0);
+      let net, vat, total;
+      if (vatOn && inclusive) { net = gross / (1 + rate / 100); vat = gross - net; total = gross; }
+      else if (vatOn) { net = gross; vat = gross * (rate / 100); total = gross + vat; }
+      else { net = gross; vat = 0; total = gross; }
+
+      const saleId = DB.uid('sale');
+      const createdAt = g.date.toISOString();          // ← backdated
+      const orderDate = Config.todayKey(g.date);
+      const receiptNo = g.receipt || Config.nextReceiptNo(t.id, t.slug);
+      const cashier = g.cashier || 'Imported';
+      const count = g.items.reduce((s, it) => s + it.qty, 0);
+
+      DB.run(`INSERT INTO sales(id,tenant_id,receipt_no,order_no,order_date,subtotal,vat_amount,total,cash_received,change_due,
+               item_count,cashier,vat_inclusive,vat_rate,service_charge,service_charge_rate,origin_device,currency,status,synced,created_at)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [saleId, t.id, receiptNo, null, orderDate, net, vat, total, total, 0, count,
+         cashier, inclusive ? 1 : 0, vatOn ? rate : 0, 0, 0, Config.deviceId(), t.currency, 'completed', syncCloud ? 0 : 1, createdAt]);
+
+      const items = g.items.map((it) => {
+        const id = DB.uid('si'); const lineTotal = it.unit * it.qty;
+        const v = findVariationByName(t.id, it.name);
+        if (v) matched++;
+        DB.run(`INSERT INTO sale_items(id,sale_id,tenant_id,product_id,variation_id,name,sku,qty,unit_price,list_price,line_total)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+          [id, saleId, t.id, v ? v.product_id : null, v ? v.id : null, it.name, v ? v.sku : null, it.qty, it.unit, it.unit, lineTotal]);
+        if (adjustStock && v && v.track_stock) {
+          const ns = Number(v.stock) - it.qty;
+          DB.run('UPDATE variations SET stock=?, updated_at=? WHERE id=?', [ns, nowIso, v.id]);
+          if (syncCloud) Sync.queue('stock', v.id, 'set', { stock: ns }, t.id);
+        }
+        itemsCount++;
+        return { id, tenant_id: t.id, product_id: v ? v.product_id : null, variation_id: v ? v.id : null,
+                 name: it.name, sku: v ? v.sku : null, qty: it.qty, unit_price: it.unit, list_price: it.unit, line_total: lineTotal };
+      });
+
+      if (syncCloud) {
+        Sync.queue('sale', saleId, 'create', { sale: {
+          id: saleId, tenant_id: t.id, receipt_no: receiptNo, order_date: orderDate,
+          subtotal: net, vat_amount: vat, total, cash_received: total, change_due: 0, item_count: count,
+          cashier, vat_inclusive: inclusive ? 1 : 0, vat_rate: vatOn ? rate : 0, service_charge: 0, service_charge_rate: 0,
+          origin_device: Config.deviceId(), currency: t.currency, status: 'completed', created_at: createdAt
+        }, items }, t.id);
+      }
+      salesCount++;
+    });
+
+    DB.persistNow();
+    if (syncCloud && Sync.configured()) Sync.run(false);
+    updateSyncPill();
+    res.style.color = 'var(--ok)';
+    res.textContent = `Imported ${salesCount} sale(s), ${itemsCount} item(s)`
+      + (matched ? ` · ${matched} line(s) matched to inventory` : '')
+      + (skipped ? ` · skipped ${skipped} row(s) missing a Date or Item` : '') + '.';
+    toast('Past sales imported', 'ok');
+  }
+
   /* ---------------- View switching ---------------- */
   function switchView(name) {
     $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.view === name));
@@ -1936,6 +2075,17 @@
       await DB.import(buf); toast('Restored — reloading'); setTimeout(() => location.reload(), 800);
     });
     $('#wipeBtn').addEventListener('click', () => { if (confirm('Erase ALL local data on this device? This cannot be undone.')) DB.wipe(); });
+
+    // Import past sales (backdated) from CSV/Excel.
+    $('#salesTemplateBtn').addEventListener('click', downloadSalesTemplate);
+    $('#importSalesBtn').addEventListener('click', () => $('#importSalesFile').click());
+    $('#importSalesFile').addEventListener('change', async (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      if (!confirm('Import past sales from this file? They will be added as backdated sales for “' + (Config.activeTenant() || {}).name + '”.')) { e.target.value = ''; return; }
+      try { await importSalesFile(f); } catch (err) { toast('Import failed: ' + ((err && err.message) || err), 'err'); }
+      e.target.value = '';
+      if ($('#view-reports').classList.contains('active')) renderReports();
+    });
 
     // Network + sync listeners
     window.addEventListener('online', updateNetPill);

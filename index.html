@@ -299,6 +299,19 @@
             </div>
             <p class="hint">The <b>.sqlite</b> backup is the full database and is the one you restore from. The <b>.xlsx</b> export is a readable Excel workbook (products, stock, sales, staff, suppliers) for reporting — it is not used for restore. A <b>weekly auto-backup</b> is also kept automatically in this device's storage and refreshed once a week; use the button to download the latest copy.</p>
           </div>
+          <div class="card" id="importSalesCard">
+            <h3>Import past sales</h3>
+            <p class="muted">Bring in historical sales from a spreadsheet (<b>.csv</b> or <b>.xlsx</b>). Each row is one item line; rows that share the same <b>Receipt</b> value are grouped into a single sale. Every sale is <b>backdated</b> to the Date you provide, so it lands in the right place in Reports.</p>
+            <div class="toolbar">
+              <button class="btn" id="salesTemplateBtn">Download template (.csv)</button>
+              <button class="btn brand" id="importSalesBtn">Import sales file…</button>
+              <input type="file" id="importSalesFile" accept=".csv,.xlsx,.xls" hidden>
+            </div>
+            <label class="switch" style="margin-top:10px"><input type="checkbox" id="importSyncCloud" checked> Also upload the imported sales to the cloud (other devices see them)</label>
+            <label class="switch"><input type="checkbox" id="importAdjustStock"> Reduce current stock for items it can match by name (off = history only)</label>
+            <p class="hint">Columns (header names are flexible): <b>Date</b>, <b>Receipt</b> (optional, groups lines into one sale), <b>Item</b>, <b>Qty</b>, <b>UnitPrice</b>, <b>Cashier</b> (optional). VAT is applied using this shop's current tax settings.</p>
+            <p class="hint" id="importSalesResult"></p>
+          </div>
           <div class="card">
             <h3>About</h3>
             <p class="muted">Totals POS <span id="appVersion">—</span> · Offline-first PWA · SQLite (WebAssembly) · Multi-tenant.</p>
