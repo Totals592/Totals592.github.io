@@ -47,6 +47,12 @@
   // press anywhere in the app (login screen counts), well before any scan.
   let audioCtx = null;
   function scanSoundEnabled() { return DB.getSetting('scan_sound') !== '0'; }
+  // 0-100 scale, stored per device; defaults loud since a scan beep needs to
+  // cut through a busy shop floor.
+  function scanSoundVolume() {
+    const v = parseInt(DB.getSetting('scan_sound_volume'), 10);
+    return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 85;
+  }
   function ensureAudioCtx() {
     if (!audioCtx) {
       try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return null; }
@@ -70,20 +76,26 @@
   ['pointerdown', 'touchstart', 'keydown'].forEach((evt) =>
     document.addEventListener(evt, unlockAudio, { once: true, capture: true }));
 
-  function beep(freq, dur) {
-    if (!scanSoundEnabled()) return;
+  function beep(freq, dur, forceVolPct) {
+    if (!scanSoundEnabled() && forceVolPct == null) return;
     try {
       const ctx = ensureAudioCtx();
       if (!ctx) return;
       if (ctx.state === 'suspended') ctx.resume().catch(() => {}); // defensive re-unlock every call
       const t0 = ctx.currentTime;
+      const d = dur || 0.11;
+      const pct = forceVolPct != null ? forceVolPct : scanSoundVolume();
+      // Square wave reads as a much louder, more piercing "beep" than sine at
+      // the same amplitude (closer to a real barcode scanner) — scale peak
+      // gain by the volume setting, capped so it never clips.
+      const peak = 0.06 + (pct / 100) * 0.55; // ~0.06 (min, still audible) .. 0.61 (max)
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.type = 'sine'; osc.frequency.value = freq || 1600;
-      gain.gain.setValueAtTime(0.28, t0);
-      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + (dur || 0.1));
+      osc.type = 'square'; osc.frequency.value = freq || 1800;
+      gain.gain.setValueAtTime(peak, t0);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + d);
       osc.connect(gain); gain.connect(ctx.destination);
-      osc.start(t0); osc.stop(t0 + (dur || 0.1));
+      osc.start(t0); osc.stop(t0 + d);
     } catch (e) { /* audio unsupported/blocked — never break scanning */ }
   }
 
@@ -1895,6 +1907,7 @@
     $('#setCashier').value = DB.getSetting('cashier_name') || '';
     $('#setLightMode').checked = currentTheme() === 'light';
     $('#setScanSound').checked = scanSoundEnabled();
+    $('#setScanVolume').value = scanSoundVolume();
     // Sales / VAT / service charge for the active shop.
     const t = Config.activeTenant() || {};
     $('#setVatEnabled').checked = !!t.vat_enabled;
@@ -2195,14 +2208,15 @@
       DB.setSetting('scan_sound', e.target.checked ? '1' : '0'); DB.persistNow();
       if (e.target.checked) beep(); // audible confirmation it's on
     });
+    $('#setScanVolume').addEventListener('input', (e) => {
+      DB.setSetting('scan_sound_volume', e.target.value); DB.persistNow();
+    });
+    $('#setScanVolume').addEventListener('change', () => beep()); // preview at the new level once released
     $('#testSoundBtn').addEventListener('click', () => {
       unlockAudio(); // this click is itself a real gesture — unlock, then force a beep regardless of the setting
       const ctx = ensureAudioCtx();
       if (!ctx) { toast('This browser does not support Web Audio', 'err'); return; }
-      const was = scanSoundEnabled();
-      if (!was) DB.setSetting('scan_sound', '1');
-      beep();
-      if (!was) DB.setSetting('scan_sound', '0'); // restore — testing shouldn't silently turn it on
+      beep(null, null, parseInt($('#setScanVolume').value, 10)); // always audible, independent of the on/off toggle
       toast('If you heard a beep, sound is working on this device', 'ok');
     });
 
