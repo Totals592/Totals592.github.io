@@ -235,6 +235,8 @@
               <div><label>Register / device name</label><input id="setDevice"></div>
               <div><label>Cashier name</label><input id="setCashier"></div>
             </div>
+            <label class="switch" style="margin-top:10px"><input type="checkbox" id="setLightMode"> Light mode</label>
+            <label class="switch"><input type="checkbox" id="setScanSound" checked> 🔊 Sound on scan</label>
             <button class="btn brand" id="saveDeviceBtn" style="margin-top:12px">Save</button>
           </div>
           <div class="card" id="taxCard">
@@ -315,6 +317,10 @@
           <div class="card">
             <h3>About</h3>
             <p class="muted">Totals POS <span id="appVersion">—</span> · Offline-first PWA · SQLite (WebAssembly) · Multi-tenant.</p>
+            <div class="toolbar" style="margin-top:8px">
+              <button class="btn" id="checkUpdateBtn">Check for update</button>
+            </div>
+            <p class="hint">Installed as an app? Updates are checked automatically, but if this device has been offline or closed for a while, tap the button above after reconnecting to fetch the latest version right away.</p>
           </div>
         </section>
       </main>
