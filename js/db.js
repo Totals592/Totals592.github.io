@@ -114,6 +114,7 @@ window.DB = (function () {
     order_no_on_receipt INTEGER DEFAULT 1,
     analytics_enabled INTEGER DEFAULT 0,
     remote_sales_enabled INTEGER DEFAULT 1,
+    import_inventory_enabled INTEGER DEFAULT 0,
     categories TEXT,
     receipt_footer TEXT,
     logo TEXT,
@@ -373,7 +374,16 @@ window.DB = (function () {
     ensureColumn('sale_items', 'list_price', 'REAL');
     ensureColumn('staff', 'can_view_sales', 'INTEGER DEFAULT 0');
     ensureColumn('staff', 'can_manage_inventory', 'INTEGER DEFAULT 0');
+    ensureColumn('tenants', 'import_inventory_enabled', 'INTEGER DEFAULT 0');
   }
+
+  // Settings that describe THIS DEVICE, not shop/tenant data — preserved
+  // across "Erase all local data" (see wipe()) rather than reset to defaults.
+  const WIPE_KEEP_KEYS = [
+    'admin_pin', 'device_name', 'cashier_name', 'device_id', 'api_base',
+    'theme', 'scan_sound', 'scan_sound_volume'
+  ];
+  const WIPE_STASH_KEY = 'totals_wipe_keep';
 
   /* ---------- Init ---------- */
   async function init() {
@@ -386,6 +396,19 @@ window.DB = (function () {
       db.run(SCHEMA);
       migrate();
       seedIfEmpty();
+      // Restore this device's own settings if this is a fresh/wiped database
+      // (see wipe()) — never touches a database that was loaded from a saved
+      // IndexedDB blob, only a brand-new one.
+      if (!saved) {
+        try {
+          const stash = localStorage.getItem(WIPE_STASH_KEY);
+          if (stash) {
+            const keep = JSON.parse(stash);
+            Object.keys(keep).forEach((k) => setSetting(k, keep[k]));
+          }
+        } catch (e) {}
+        try { localStorage.removeItem(WIPE_STASH_KEY); } catch (e) {}
+      }
       // Make sure an active tenant is always set.
       if (!getSetting('active_tenant_id')) {
         const t = get('SELECT id FROM tenants ORDER BY created_at LIMIT 1');
@@ -404,6 +427,19 @@ window.DB = (function () {
     // expose for import/export/backup
     export: () => db.export(),
     import: async (bytes) => { db = new SQL.Database(new Uint8Array(bytes)); db.run(SCHEMA); await persistNow(); },
-    wipe: async () => { await idbPut(IDB_KEY, null); location.reload(); }
+    // "Erase all local data" clears every shop's business data on this device,
+    // but this DEVICE's own configuration (admin PIN, device/cashier name,
+    // cloud address, display prefs) is not shop data and should not silently
+    // reset — stash it (outside the database being wiped) and init() restores
+    // it into the fresh database on the next load.
+    wipe: async () => {
+      try {
+        const keep = {};
+        WIPE_KEEP_KEYS.forEach((k) => { const v = getSetting(k); if (v !== null && v !== undefined) keep[k] = v; });
+        localStorage.setItem(WIPE_STASH_KEY, JSON.stringify(keep));
+      } catch (e) {}
+      await idbPut(IDB_KEY, null);
+      location.reload();
+    }
   };
 })();

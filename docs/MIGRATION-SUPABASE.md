@@ -69,6 +69,7 @@ create table if not exists tenants (
   order_no_on_receipt int default 1,
   analytics_enabled int default 0,
   remote_sales_enabled int default 1,
+  import_inventory_enabled int default 0,
   categories text,
   receipt_footer text,
   logo text,
@@ -189,6 +190,7 @@ alter table variations add column if not exists expiry_date text;
 alter table sale_items add column if not exists list_price numeric;
 alter table staff      add column if not exists can_view_sales int default 0;
 alter table staff      add column if not exists can_manage_inventory int default 0;
+alter table tenants    add column if not exists import_inventory_enabled int default 0;
 ```
 
 ## 3. The sync API — Supabase Edge Function
