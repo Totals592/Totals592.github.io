@@ -36,21 +36,54 @@
   // A short synthesized beep (no audio file needed) confirming a barcode was
   // read, whether scanning to sell or scanning to add inventory. Per-device
   // preference, on by default.
+  //
+  // Browsers only allow an AudioContext to produce sound once it has been
+  // "unlocked" by a genuine, synchronous user gesture (a click/tap/keydown
+  // handled directly, not from inside an async callback). Camera-based
+  // scanning detects barcodes inside an async video-frame loop, which is NOT
+  // itself a gesture — so if the context were created lazily on the first
+  // scan, browsers (Safari especially) can leave it silently suspended
+  // forever. To avoid that, unlock it eagerly on the very first tap/click/key
+  // press anywhere in the app (login screen counts), well before any scan.
   let audioCtx = null;
   function scanSoundEnabled() { return DB.getSetting('scan_sound') !== '0'; }
+  function ensureAudioCtx() {
+    if (!audioCtx) {
+      try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return null; }
+    }
+    return audioCtx;
+  }
+  function unlockAudio() {
+    const ctx = ensureAudioCtx();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    // Play a silent, zero-length blip synchronously within this gesture — the
+    // actual unlock step some browsers (iOS Safari) require beyond resume().
+    try {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.start(0); osc.stop(ctx.currentTime + 0.001);
+    } catch (e) {}
+  }
+  ['pointerdown', 'touchstart', 'keydown'].forEach((evt) =>
+    document.addEventListener(evt, unlockAudio, { once: true, capture: true }));
+
   function beep(freq, dur) {
     if (!scanSoundEnabled()) return;
     try {
-      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
-      const t0 = audioCtx.currentTime;
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
+      const ctx = ensureAudioCtx();
+      if (!ctx) return;
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {}); // defensive re-unlock every call
+      const t0 = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
       osc.type = 'sine'; osc.frequency.value = freq || 1600;
-      gain.gain.setValueAtTime(0.18, t0);
-      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + (dur || 0.09));
-      osc.connect(gain); gain.connect(audioCtx.destination);
-      osc.start(t0); osc.stop(t0 + (dur || 0.09));
+      gain.gain.setValueAtTime(0.28, t0);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + (dur || 0.1));
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.start(t0); osc.stop(t0 + (dur || 0.1));
     } catch (e) { /* audio unsupported/blocked — never break scanning */ }
   }
 
@@ -2161,6 +2194,16 @@
     $('#setScanSound').addEventListener('change', (e) => {
       DB.setSetting('scan_sound', e.target.checked ? '1' : '0'); DB.persistNow();
       if (e.target.checked) beep(); // audible confirmation it's on
+    });
+    $('#testSoundBtn').addEventListener('click', () => {
+      unlockAudio(); // this click is itself a real gesture — unlock, then force a beep regardless of the setting
+      const ctx = ensureAudioCtx();
+      if (!ctx) { toast('This browser does not support Web Audio', 'err'); return; }
+      const was = scanSoundEnabled();
+      if (!was) DB.setSetting('scan_sound', '1');
+      beep();
+      if (!was) DB.setSetting('scan_sound', '0'); // restore — testing shouldn't silently turn it on
+      toast('If you heard a beep, sound is working on this device', 'ok');
     });
 
     // Network + sync listeners
