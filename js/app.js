@@ -32,9 +32,32 @@
   $('#modalBack').addEventListener('click', (e) => { if (e.target.id === 'modalBack') closeModal(); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
+  /* ---------------- Scan sound ---------------- */
+  // A short synthesized beep (no audio file needed) confirming a barcode was
+  // read, whether scanning to sell or scanning to add inventory. Per-device
+  // preference, on by default.
+  let audioCtx = null;
+  function scanSoundEnabled() { return DB.getSetting('scan_sound') !== '0'; }
+  function beep(freq, dur) {
+    if (!scanSoundEnabled()) return;
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+      const t0 = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine'; osc.frequency.value = freq || 1600;
+      gain.gain.setValueAtTime(0.18, t0);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + (dur || 0.09));
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      osc.start(t0); osc.stop(t0 + (dur || 0.09));
+    } catch (e) { /* audio unsupported/blocked — never break scanning */ }
+  }
+
   /* ---------------- Cart state ---------------- */
   let cart = []; // {variation_id, product_id, name, sku, unit_price, qty, track_stock, stock}
   let modalCleanup = null; // releases the camera when a scanner modal closes
+  let swReg = null; // this device's service worker registration (set once, used by update checks)
 
   function cartAdd(v, p) {
     const line = cart.find((c) => c.variation_id === v.id);
@@ -239,6 +262,7 @@
       if (code === lastCode && now - lastAt < 1500) return; // debounce repeats
       lastCode = code; lastAt = now;
       if (navigator.vibrate) { try { navigator.vibrate(60); } catch (e) {} }
+      beep();
       if (opts.continuous) {
         // Stay open so the cashier can scan several items in a row.
         if (opts.onCode) opts.onCode(code);
@@ -438,9 +462,35 @@
         <td><div class="row-actions">
           <button class="btn small" data-editprod="${r.pid}">Edit</button>
           <button class="btn small" data-restock="${r.id}">Restock</button>
+          <button class="btn small danger" data-delrow="${r.id}">Delete</button>
         </div></td>
       </tr>`;
     }).join('') || '<tr><td colspan="10" class="muted center">No matching items.</td></tr>';
+  }
+
+  // Delete a single inventory row. If it is the product's only active
+  // variation, the whole product is removed (same as the Delete button inside
+  // the product editor); otherwise just that variation is deactivated and the
+  // product's remaining variations are re-synced.
+  function deleteInventoryRow(vid) {
+    const v = DB.get('SELECT * FROM variations WHERE id = ?', [vid]);
+    if (!v) return;
+    const p = DB.get('SELECT * FROM products WHERE id = ?', [v.product_id]);
+    const activeCount = (DB.get('SELECT COUNT(*) AS n FROM variations WHERE product_id = ? AND active = 1', [v.product_id]) || {}).n || 0;
+    const now = DB.nowISO();
+    if (activeCount <= 1) {
+      if (!confirm('Delete "' + (p ? p.name : 'this item') + '" from inventory? This cannot be undone.')) return;
+      DB.run('UPDATE products SET active = 0, updated_at = ? WHERE id = ?', [now, v.product_id]);
+      DB.run('UPDATE variations SET active = 0, updated_at = ? WHERE product_id = ?', [now, v.product_id]);
+      Sync.queue('product', v.product_id, 'delete', { id: v.product_id }, v.tenant_id);
+    } else {
+      const label = (p ? p.name : '') + (v.name && v.name !== 'Default' ? ' · ' + v.name : '');
+      if (!confirm('Delete "' + label + '" from inventory?')) return;
+      DB.run('UPDATE variations SET active = 0, updated_at = ? WHERE id = ?', [now, vid]);
+      Sync.queue('product', v.product_id, 'update',
+        { product: p, variations: DB.all('SELECT * FROM variations WHERE product_id = ?', [v.product_id]) }, v.tenant_id);
+    }
+    DB.persistNow(); renderInventory(); renderPOS(); toast('Deleted from inventory', 'ok');
   }
   function kpi(v, k, cls) { return `<div class="kpi"><div class="v ${cls === 'low' ? '' : ''}">${v}</div><div class="k">${k}</div></div>`; }
 
@@ -465,7 +515,10 @@
 
   // The category list for the active shop: the tenant's own headers, plus
   // sensible defaults, plus any categories already used by products.
-  const DEFAULT_CATEGORIES = ['Food', 'Drinks', 'Desserts', 'Snacks', 'Services', 'General'];
+  // No preset category list — every shop starts with only "General" and
+  // builds its own list via "Add new category…" (plus whatever categories its
+  // existing products already use).
+  const DEFAULT_CATEGORIES = ['General'];
   function tenantCategories(t) {
     let custom = [];
     try { custom = JSON.parse((t && t.categories) || '[]'); } catch (e) { custom = []; }
@@ -1576,6 +1629,12 @@
     out.textContent = L.join('\n');
   }
 
+  /* ---------------- Theme (light / dark) ---------------- */
+  // Per-device preference, stored locally like device name — a shop may run
+  // registers in different lighting and want different themes on each.
+  function currentTheme() { return DB.getSetting('theme') === 'light' ? 'light' : 'dark'; }
+  function applyTheme(theme) { document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark'; }
+
   /* ---------------- Status pills ---------------- */
   function updateNetPill() {
     const on = navigator.onLine;
@@ -1801,6 +1860,8 @@
   function loadSettings() {
     $('#setDevice').value = Config.deviceName();
     $('#setCashier').value = DB.getSetting('cashier_name') || '';
+    $('#setLightMode').checked = currentTheme() === 'light';
+    $('#setScanSound').checked = scanSoundEnabled();
     // Sales / VAT / service charge for the active shop.
     const t = Config.activeTenant() || {};
     $('#setVatEnabled').checked = !!t.vat_enabled;
@@ -1858,7 +1919,9 @@
     $('#invSearch').addEventListener('input', (e) => { invFilter = e.target.value; renderInventory(); });
     $('#invTable').addEventListener('click', (e) => {
       const ed = e.target.closest('[data-editprod]'); const rs = e.target.closest('[data-restock]');
+      const del = e.target.closest('[data-delrow]');
       if (ed) productModal(ed.dataset.editprod); if (rs) restockModal(rs.dataset.restock);
+      if (del) deleteInventoryRow(del.dataset.delrow);
     });
     $('#exportInvBtn').addEventListener('click', () => {
       const tid = Config.activeTenantId();
@@ -2087,6 +2150,19 @@
       if ($('#view-reports').classList.contains('active')) renderReports();
     });
 
+    $('#checkUpdateBtn').addEventListener('click', () => checkForUpdate(true));
+
+    // Settings — light/dark mode and scan sound apply immediately.
+    $('#setLightMode').addEventListener('change', (e) => {
+      const theme = e.target.checked ? 'light' : 'dark';
+      DB.setSetting('theme', theme); DB.persistNow();
+      applyTheme(theme);
+    });
+    $('#setScanSound').addEventListener('change', (e) => {
+      DB.setSetting('scan_sound', e.target.checked ? '1' : '0'); DB.persistNow();
+      if (e.target.checked) beep(); // audible confirmation it's on
+    });
+
     // Network + sync listeners
     window.addEventListener('online', updateNetPill);
     window.addEventListener('offline', updateNetPill);
@@ -2105,15 +2181,33 @@
       const now = Date.now();
       if (now - scanLast > 120) scanBuf = ''; // reset between human keystrokes
       scanLast = now;
-      if (e.key === 'Enter') { if (scanBuf.length >= 3) addByBarcode(scanBuf); scanBuf = ''; return; }
+      if (e.key === 'Enter') { if (scanBuf.length >= 3) { beep(); addByBarcode(scanBuf); } scanBuf = ''; return; }
       if (e.key && e.key.length === 1) scanBuf += e.key;
     });
   }
 
   /* ---------------- Service worker + update flow ---------------- */
+  // Installed ("Add to Home Screen"/desktop-installed) PWAs are opened straight
+  // into the app rather than via a fresh page navigation, and some platforms
+  // throttle background timers — both mean the browser's own once-a-day update
+  // check may rarely run. So on top of a periodic timer we ALSO check whenever
+  // the app regains focus/visibility (the moment a cashier reopens it after it
+  // was idle, closed, or the device was offline), and offer a manual button.
+  let lastUpdateCheck = 0;
+  function checkForUpdate(manual) {
+    if (!swReg) { if (manual) toast('Not ready yet — try again in a moment', 'err'); return Promise.resolve(); }
+    const now = Date.now();
+    if (!manual && now - lastUpdateCheck < 5 * 60 * 1000) return Promise.resolve(); // throttle background triggers
+    lastUpdateCheck = now;
+    return swReg.update().then(() => {
+      if (swReg.waiting) { showUpdateBanner(swReg.waiting); if (manual) toast('Update ready — tap “Update now”', 'ok'); }
+      else if (manual) toast('You’re on the latest version', 'ok');
+    }).catch(() => { if (manual) toast('Could not check for updates — check your connection', 'err'); });
+  }
   function registerSW() {
     if (!('serviceWorker' in navigator)) return;
     navigator.serviceWorker.register('./sw.js').then((reg) => {
+      swReg = reg;
       // Detect a newly installed worker waiting to take over.
       function checkWaiting() {
         if (reg.waiting) showUpdateBanner(reg.waiting);
@@ -2126,8 +2220,15 @@
           if (nw.state === 'installed' && navigator.serviceWorker.controller) showUpdateBanner(nw);
         });
       });
-      // Poll for updates so registers pick up new versions we push.
-      setInterval(() => reg.update().catch(() => {}), 60 * 60 * 1000);
+      // Poll for updates so registers pick up new versions we push, even while
+      // left open for a long time (common for a till that's never closed).
+      setInterval(() => checkForUpdate(false), 15 * 60 * 1000);
+      // The moment the app comes back to the foreground — e.g. an installed
+      // PWA reopened after being closed, backgrounded, or offline — check
+      // right away instead of waiting for the next timer tick.
+      document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkForUpdate(false); });
+      window.addEventListener('focus', () => checkForUpdate(false));
+      window.addEventListener('online', () => checkForUpdate(false));
       // Report version.
       const mc = new MessageChannel();
       mc.port1.onmessage = (e) => { if (e.data && e.data.version) $('#appVersion').textContent = e.data.version; };
@@ -2151,6 +2252,7 @@
   /* ---------------- Boot ---------------- */
   async function boot() {
     await DB.init();
+    applyTheme(currentTheme());
     // Keep a rolling weekly snapshot in device storage (overwrites last week's).
     DB.autoBackupIfDue();
     wire();
