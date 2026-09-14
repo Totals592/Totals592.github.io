@@ -929,7 +929,10 @@
     };
     const filterActive = !!(from || to || q);
     const filtered = allSales.filter(inFilter);
-    const display = filterActive ? filtered : allSales.slice(0, 100);
+    // With no filter applied, only show the most recent sales for a snappy
+    // table — a date/search filter (e.g. to review an imported batch of
+    // backdated sales) always shows every matching row, no matter how many.
+    const display = filterActive ? filtered : allSales.slice(0, 300);
 
     // KPIs reflect the selected range when a filter is active, else today.
     const kpiSet = (filterActive ? filtered : allSales.filter((s) => new Date(s.created_at) >= today))
@@ -1197,6 +1200,7 @@
         <label>Receipt footer message</label><input id="tFooter" value="${esc(t.receipt_footer || '')}">
         <label class="switch" style="margin-top:10px"><input type="checkbox" id="tAnalytics" ${t.analytics_enabled === 1 ? 'checked' : ''}> Enable Report Analytics (paid tier)</label>
         <label class="switch"><input type="checkbox" id="tRemoteSales" ${(t.remote_sales_enabled ?? 1) !== 0 ? 'checked' : ''}> Managers can see real-time sales from all devices</label>
+        <label class="switch"><input type="checkbox" id="tImportInventory" ${t.import_inventory_enabled === 1 ? 'checked' : ''}> Allow creating inventory from imported sales (paid tier)</label>
       </div>
       <div class="foot"><button class="btn ghost" data-close>Cancel</button><button class="btn brand" id="tSave">Save</button></div>`, true);
     const m = $('#modal');
@@ -1212,17 +1216,18 @@
         vat_rate: parseFloat($('#tVat', m).value) || 0, vat_inclusive: parseInt($('#tVatInc', m).value, 10),
         status: $('#tStatus', m).value, receipt_footer: $('#tFooter', m).value.trim(),
         analytics_enabled: $('#tAnalytics', m).checked ? 1 : 0,
-        remote_sales_enabled: $('#tRemoteSales', m).checked ? 1 : 0
+        remote_sales_enabled: $('#tRemoteSales', m).checked ? 1 : 0,
+        import_inventory_enabled: $('#tImportInventory', m).checked ? 1 : 0
       };
       let id = tid;
       if (editing) {
-        DB.run(`UPDATE tenants SET name=?,tin=?,slug=?,phone=?,email=?,address=?,currency=?,vat_rate=?,vat_inclusive=?,status=?,receipt_footer=?,analytics_enabled=?,remote_sales_enabled=?,updated_at=? WHERE id=?`,
-          [vals.name, vals.tin, vals.slug, vals.phone, vals.email, vals.address, vals.currency, vals.vat_rate, vals.vat_inclusive, vals.status, vals.receipt_footer, vals.analytics_enabled, vals.remote_sales_enabled, now, tid]);
+        DB.run(`UPDATE tenants SET name=?,tin=?,slug=?,phone=?,email=?,address=?,currency=?,vat_rate=?,vat_inclusive=?,status=?,receipt_footer=?,analytics_enabled=?,remote_sales_enabled=?,import_inventory_enabled=?,updated_at=? WHERE id=?`,
+          [vals.name, vals.tin, vals.slug, vals.phone, vals.email, vals.address, vals.currency, vals.vat_rate, vals.vat_inclusive, vals.status, vals.receipt_footer, vals.analytics_enabled, vals.remote_sales_enabled, vals.import_inventory_enabled, now, tid]);
       } else {
         id = DB.uid('ten');
-        DB.run(`INSERT INTO tenants(id,name,tin,slug,phone,email,address,currency,vat_rate,vat_inclusive,status,receipt_footer,analytics_enabled,remote_sales_enabled,updated_at,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [id, vals.name, vals.tin, vals.slug, vals.phone, vals.email, vals.address, vals.currency, vals.vat_rate, vals.vat_inclusive, vals.status, vals.receipt_footer, vals.analytics_enabled, vals.remote_sales_enabled, now, now]);
+        DB.run(`INSERT INTO tenants(id,name,tin,slug,phone,email,address,currency,vat_rate,vat_inclusive,status,receipt_footer,analytics_enabled,remote_sales_enabled,import_inventory_enabled,updated_at,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [id, vals.name, vals.tin, vals.slug, vals.phone, vals.email, vals.address, vals.currency, vals.vat_rate, vals.vat_inclusive, vals.status, vals.receipt_footer, vals.analytics_enabled, vals.remote_sales_enabled, vals.import_inventory_enabled, now, now]);
         // Give a brand-new shop a default manager login (change the PIN after).
         await createStaff(id, { name: 'Manager', username: 'manager', pin: '1234', role: 'manager' });
       }
@@ -1776,6 +1781,26 @@
     }) || null;
   }
 
+  // Create a new inventory item (name + price only) for a sale-import line
+  // that matched nothing existing. Paid feature — gated by the tenant's
+  // import_inventory_enabled flag; callers must check that before calling this.
+  // Stock is left untracked (0/off) since a sales-only import has no real
+  // current stock count to go on.
+  function createInventoryFromImport(tid, name, price) {
+    const now = DB.nowISO();
+    const pid = DB.uid('prd');
+    DB.run(`INSERT INTO products(id,tenant_id,name,category,active,sort,updated_at,created_at)
+            VALUES(?,?,?,?,?,?,?,?)`, [pid, tid, name, 'General', 1, 0, now, now]);
+    const vid = DB.uid('var');
+    DB.run(`INSERT INTO variations(id,product_id,tenant_id,name,price,track_stock,active,updated_at,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?)`, [vid, pid, tid, 'Default', price, 0, 1, now, now]);
+    const variation = DB.get('SELECT * FROM variations WHERE id = ?', [vid]);
+    Sync.queue('product', pid, 'create',
+      { product: { id: pid, tenant_id: tid, name, category: 'General', active: 1 },
+        variations: [variation] }, tid);
+    return variation;
+  }
+
   function parseImportDate(v) {
     if (v instanceof Date && !isNaN(v)) return v;
     if (typeof v === 'number' && v > 0) { const d = new Date(Math.round((v - 25569) * 86400 * 1000)); return isNaN(d) ? null : d; }
@@ -1826,11 +1851,16 @@
 
     const syncCloud = $('#importSyncCloud').checked;
     const adjustStock = $('#importAdjustStock').checked;
+    // Paid feature: even if the checkbox were somehow checked without the
+    // tenant flag (it's disabled in the UI otherwise), the tenant's own
+    // setting is the source of truth here, not the checkbox alone.
+    const createInventory = $('#importCreateInventory').checked && t.import_inventory_enabled === 1;
+    const createdCache = new Map(); // avoids creating duplicates for a name repeated across rows in this file
     const rate = Number(t.vat_rate) || 0;
     const vatOn = !!t.vat_enabled && rate > 0;
     const inclusive = !!t.vat_inclusive;
     const nowIso = DB.nowISO();
-    let salesCount = 0, itemsCount = 0, matched = 0;
+    let salesCount = 0, itemsCount = 0, matched = 0, created = 0;
 
     groups.forEach((g) => {
       if (!g.items.length) return;
@@ -1855,7 +1885,12 @@
 
       const items = g.items.map((it) => {
         const id = DB.uid('si'); const lineTotal = it.unit * it.qty;
-        const v = findVariationByName(t.id, it.name);
+        let v = findVariationByName(t.id, it.name);
+        if (!v && createInventory && it.name) {
+          const key = it.name.trim().toLowerCase();
+          if (createdCache.has(key)) v = createdCache.get(key);
+          else { v = createInventoryFromImport(t.id, it.name, it.unit); createdCache.set(key, v); created++; }
+        }
         if (v) matched++;
         DB.run(`INSERT INTO sale_items(id,sale_id,tenant_id,product_id,variation_id,name,sku,qty,unit_price,list_price,line_total)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
@@ -1887,6 +1922,7 @@
     res.style.color = 'var(--ok)';
     res.textContent = `Imported ${salesCount} sale(s), ${itemsCount} item(s)`
       + (matched ? ` · ${matched} line(s) matched to inventory` : '')
+      + (created ? ` · ${created} new inventory item(s) created` : '')
       + (skipped ? ` · skipped ${skipped} row(s) missing a Date or Item` : '') + '.';
     toast('Past sales imported', 'ok');
   }
@@ -1922,6 +1958,13 @@
     $('#setOrderNoOnReceipt').checked = t.order_no_on_receipt !== 0;
     let cats = []; try { cats = JSON.parse(t.categories || '[]'); } catch (e) {}
     $('#setCategories').value = cats.join('\n');
+    // "Create inventory from import" is a paid tier feature, like Report
+    // Analytics — the checkbox stays off and disabled until an admin enables
+    // it for this shop.
+    const importInvOn = t.import_inventory_enabled === 1;
+    $('#importCreateInventory').disabled = !importInvOn;
+    if (!importInvOn) $('#importCreateInventory').checked = false;
+    $('#importCreateInventoryTag').textContent = importInvOn ? 'enabled' : 'paid feature — off, ask an administrator to enable it';
     renderStaff();
     updateSyncPill();
   }
@@ -2183,7 +2226,24 @@
       const buf = new Uint8Array(await f.arrayBuffer());
       await DB.import(buf); toast('Restored — reloading'); setTimeout(() => location.reload(), 800);
     });
-    $('#wipeBtn').addEventListener('click', () => { if (confirm('Erase ALL local data on this device? This cannot be undone.')) DB.wipe(); });
+    $('#wipeBtn').addEventListener('click', async () => {
+      if (!confirm('Erase ALL local data on THIS DEVICE — every shop it has, not just the one you have open? This cannot be undone. (Your admin PIN, device name and cloud address are device settings and will NOT be reset.)')) return;
+      // Flush the outbox BEFORE wiping. Otherwise any action taken moments ago
+      // (e.g. deleting a tenant) that hasn't reached the cloud yet is
+      // destroyed along with the local database — then the very next sync
+      // re-downloads the server's still-unchanged copy, making it look like
+      // the deletion/edit "came back" after the erase.
+      const pending = Sync.pendingCount();
+      if (pending > 0) {
+        if (Sync.configured() && navigator.onLine) {
+          toast('Uploading ' + pending + ' pending change(s) before erasing…');
+          try { await Sync.run(true); } catch (e) {}
+        }
+        const stillPending = Sync.pendingCount();
+        if (stillPending > 0 && !confirm(stillPending + ' change(s) could not be uploaded to the cloud (offline, or cloud sync is off) and will be PERMANENTLY LOST — including any recent tenant/staff/inventory deletions or edits. Erase anyway?')) return;
+      }
+      DB.wipe();
+    });
 
     // Import past sales (backdated) from CSV/Excel.
     $('#salesTemplateBtn').addEventListener('click', downloadSalesTemplate);
@@ -2194,6 +2254,8 @@
       try { await importSalesFile(f); } catch (err) { toast('Import failed: ' + ((err && err.message) || err), 'err'); }
       e.target.value = '';
       if ($('#view-reports').classList.contains('active')) renderReports();
+      if ($('#view-inventory').classList.contains('active')) renderInventory();
+      renderPOS();
     });
 
     $('#checkUpdateBtn').addEventListener('click', () => checkForUpdate(true));

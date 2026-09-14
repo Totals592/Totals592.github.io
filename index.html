@@ -316,7 +316,8 @@
             </div>
             <label class="switch" style="margin-top:10px"><input type="checkbox" id="importSyncCloud" checked> Also upload the imported sales to the cloud (other devices see them)</label>
             <label class="switch"><input type="checkbox" id="importAdjustStock"> Reduce current stock for items it can match by name (off = history only)</label>
-            <p class="hint">Columns (header names are flexible): <b>Date</b>, <b>Receipt</b> (optional, groups lines into one sale), <b>Item</b>, <b>Qty</b>, <b>UnitPrice</b>, <b>Cashier</b> (optional). VAT is applied using this shop's current tax settings.</p>
+            <label class="switch" id="importCreateInventoryRow"><input type="checkbox" id="importCreateInventory"> Create inventory items (name + price) for lines that don't match anything — <span id="importCreateInventoryTag">paid feature</span></label>
+            <p class="hint">Columns (header names are flexible): <b>Date</b>, <b>Receipt</b> (optional, groups lines into one sale), <b>Item</b>, <b>Qty</b>, <b>UnitPrice</b>, <b>Cashier</b> (optional). VAT is applied using this shop's current tax settings. There's no fixed limit on file size — 100+ sale entries in one file work fine.</p>
             <p class="hint" id="importSalesResult"></p>
           </div>
           <div class="card">
