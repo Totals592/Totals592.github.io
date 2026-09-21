@@ -80,12 +80,14 @@ window.Sync = (function () {
   // Per-table cursors (each table has its own bigserial), stored as JSON. This
   // is robust and also pulls SALES + SALE_ITEMS so every device sees the whole
   // shop, not just what it rang up itself.
-  const CURSOR_KEYS = ['tenants', 'products', 'variations', 'staff', 'sales', 'sale_items'];
+  const CURSOR_KEYS = ['tenants', 'products', 'variations', 'staff', 'sales', 'sale_items',
+    'subscriptions', 'subscription_audit_log', 'devices'];
   function getCursors() {
     let c = {}; try { c = JSON.parse(DB.getSetting('sync_cursors') || '{}'); } catch (e) {}
     // Migrate the old single cursor to the catalogue tables.
     const legacy = Number(DB.getSetting('sync_cursor') || 0);
-    CURSOR_KEYS.forEach((k) => { if (c[k] == null) c[k] = (k === 'sales' || k === 'sale_items') ? 0 : legacy; });
+    const ZERO_START = ['sales', 'sale_items', 'subscriptions', 'subscription_audit_log', 'devices'];
+    CURSOR_KEYS.forEach((k) => { if (c[k] == null) c[k] = ZERO_START.includes(k) ? 0 : legacy; });
     return c;
   }
   function maxSeq(rows, start) {
@@ -106,7 +108,10 @@ window.Sync = (function () {
       products: deep ? 0 : cur.products,
       variations: deep ? 0 : cur.variations,
       sales: deep ? 0 : cur.sales,
-      sale_items: deep ? 0 : cur.sale_items
+      sale_items: deep ? 0 : cur.sale_items,
+      // Subscriptions/audit log/devices are small, admin-facing tables —
+      // always fetched in full, same reasoning as tenants/staff.
+      subscriptions: 0, subscription_audit_log: 0, devices: 0
     };
     // `since` keeps an old single-cursor backend working; the *_since params
     // drive the per-table backend. For a deep pull we ask for everything.
@@ -114,7 +119,9 @@ window.Sync = (function () {
     const qs = new URLSearchParams({
       since: String(since),
       tenants_since: c.tenants, products_since: c.products, variations_since: c.variations,
-      staff_since: c.staff, sales_since: c.sales, sale_items_since: c.sale_items
+      staff_since: c.staff, sales_since: c.sales, sale_items_since: c.sale_items,
+      subscriptions_since: c.subscriptions, subscription_audit_log_since: c.subscription_audit_log,
+      devices_since: c.devices
     });
     const out = await apiFetch('/api/pull?' + qs.toString(), { method: 'GET' });
     (out.tenants || []).forEach(upsertTenant);
@@ -123,6 +130,9 @@ window.Sync = (function () {
     (out.staff || []).forEach(upsertStaff);
     (out.sales || []).forEach(upsertSale);
     (out.sale_items || []).forEach(upsertSaleItem);
+    (out.subscriptions || []).forEach(upsertSubscription);
+    (out.subscription_audit_log || []).forEach(upsertAuditLogEntry);
+    (out.devices || []).forEach(upsertDevice);
 
     // Advance each cursor to the highest seq we've seen (never move it backward).
     const next = {
@@ -130,6 +140,9 @@ window.Sync = (function () {
       products: Math.max(cur.products, maxSeq(out.products, cur.products)),
       variations: Math.max(cur.variations, maxSeq(out.variations, cur.variations)),
       staff: Math.max(cur.staff, maxSeq(out.staff, cur.staff)),
+      subscriptions: Math.max(cur.subscriptions, maxSeq(out.subscriptions, cur.subscriptions)),
+      subscription_audit_log: Math.max(cur.subscription_audit_log, maxSeq(out.subscription_audit_log, cur.subscription_audit_log)),
+      devices: Math.max(cur.devices, maxSeq(out.devices, cur.devices)),
       sales: Math.max(cur.sales, maxSeq(out.sales, cur.sales)),
       sale_items: Math.max(cur.sale_items, maxSeq(out.sale_items, cur.sale_items))
     };
@@ -153,8 +166,9 @@ window.Sync = (function () {
 
   // Upserts apply "last write wins" using updated_at so remote edits win only
   // when they are newer than the local copy.
-  function newer(remote, table) {
-    const local = DB.get(`SELECT updated_at FROM ${table} WHERE id = ?`, [remote.id]);
+  function newer(remote, table, pkCol) {
+    pkCol = pkCol || 'id';
+    const local = DB.get(`SELECT updated_at FROM ${table} WHERE ${pkCol} = ?`, [remote[pkCol]]);
     if (!local) return true;
     return String(remote.updated_at || '') > String(local.updated_at || '');
   }
@@ -162,8 +176,8 @@ window.Sync = (function () {
     if (!newer(t, 'tenants')) return;
     DB.run(`INSERT INTO tenants(id,name,slug,tin,phone,email,address,currency,vat_rate,vat_inclusive,
         vat_enabled,vat_show_receipt,service_charge_enabled,service_charge_rate,service_charge_show_receipt,
-        logo_on_receipt,order_no_on_receipt,analytics_enabled,remote_sales_enabled,import_inventory_enabled,categories,receipt_footer,logo,status,updated_at,created_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        logo_on_receipt,order_no_on_receipt,analytics_enabled,remote_sales_enabled,import_inventory_enabled,expiry_tracking_enabled,categories,receipt_footer,logo,status,updated_at,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET name=excluded.name,slug=excluded.slug,tin=excluded.tin,phone=excluded.phone,
         email=excluded.email,address=excluded.address,currency=excluded.currency,vat_rate=excluded.vat_rate,
         vat_inclusive=excluded.vat_inclusive,vat_enabled=excluded.vat_enabled,vat_show_receipt=excluded.vat_show_receipt,
@@ -172,13 +186,14 @@ window.Sync = (function () {
         logo_on_receipt=excluded.logo_on_receipt,order_no_on_receipt=excluded.order_no_on_receipt,
         analytics_enabled=excluded.analytics_enabled,remote_sales_enabled=excluded.remote_sales_enabled,
         import_inventory_enabled=excluded.import_inventory_enabled,
+        expiry_tracking_enabled=excluded.expiry_tracking_enabled,
         categories=excluded.categories,receipt_footer=excluded.receipt_footer,logo=excluded.logo,
         status=excluded.status,updated_at=excluded.updated_at`,
       [t.id, t.name, t.slug, t.tin, t.phone, t.email, t.address, t.currency || 'GYD',
        t.vat_rate ?? 15, t.vat_inclusive ?? 1, t.vat_enabled ?? 1, t.vat_show_receipt ?? 1,
        t.service_charge_enabled ?? 0, t.service_charge_rate ?? 0, t.service_charge_show_receipt ?? 1,
        t.logo_on_receipt ?? 1, t.order_no_on_receipt ?? 1, t.analytics_enabled ?? 0, t.remote_sales_enabled ?? 1,
-       t.import_inventory_enabled ?? 0,
+       t.import_inventory_enabled ?? 0, t.expiry_tracking_enabled ?? 0,
        t.categories ?? null, t.receipt_footer, t.logo, t.status || 'active',
        t.updated_at || DB.nowISO(), t.created_at || DB.nowISO()]);
     // A shop deleted on another device: purge its data here too (keep the
@@ -247,6 +262,61 @@ window.Sync = (function () {
       [it.id, it.sale_id, it.tenant_id, it.product_id, it.variation_id, it.name, it.sku,
        it.qty, it.unit_price, it.list_price ?? it.unit_price, it.line_total]);
   }
+  // Subscriptions: server is authoritative (set only via the Admin's
+  // Subscription modal + the cloud's license endpoint) — plain last-write-wins.
+  function upsertSubscription(s) {
+    if (!newer(s, 'subscriptions', 'tenant_id')) return;
+    DB.run(`INSERT INTO subscriptions(tenant_id,plan,status,started_at,expires_at,grace_until,entitlements,updated_at,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(tenant_id) DO UPDATE SET plan=excluded.plan,status=excluded.status,started_at=excluded.started_at,
+        expires_at=excluded.expires_at,grace_until=excluded.grace_until,entitlements=excluded.entitlements,
+        updated_at=excluded.updated_at`,
+      [s.tenant_id, s.plan || 'trial', s.status || 'active', s.started_at, s.expires_at, s.grace_until,
+       typeof s.entitlements === 'string' ? s.entitlements : JSON.stringify(s.entitlements || {}),
+       s.updated_at || DB.nowISO(), s.created_at || DB.nowISO()]);
+  }
+  // Audit log entries are append-only — insert once, never modified.
+  function upsertAuditLogEntry(a) {
+    DB.run(`INSERT OR IGNORE INTO subscription_audit_log(id,tenant_id,action,from_plan,to_plan,from_expires,to_expires,note,at)
+      VALUES(?,?,?,?,?,?,?,?,?)`,
+      [a.id, a.tenant_id, a.action, a.from_plan, a.to_plan, a.from_expires, a.to_expires, a.note, a.at || DB.nowISO()]);
+  }
+  // Devices are recorded server-side (as a side effect of a license check-in)
+  // and only ever pulled, never pushed from a register.
+  function upsertDevice(d) {
+    DB.run(`INSERT INTO devices(device_id,tenant_id,device_name,first_seen,last_seen)
+      VALUES(?,?,?,?,?)
+      ON CONFLICT(device_id) DO UPDATE SET device_name=excluded.device_name,last_seen=excluded.last_seen`,
+      [d.device_id, d.tenant_id, d.device_name, d.first_seen || DB.nowISO(), d.last_seen || DB.nowISO()]);
+  }
+
+  /* ---------- License check-in ----------
+   * Fetches a freshly SIGNED token for the active tenant and caches it. This
+   * is the only network call the subscription system ever makes — every
+   * other check (expiry warning, grace countdown, hard lock) runs entirely
+   * off the cached, verified token, so a sale never needs it. Throttled so a
+   * healthy device only calls it a few times a day, not on every sync tick.
+   */
+  const LICENSE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
+  async function refreshLicense(force) {
+    if (!configured() || !isOnline()) return;
+    const tid = Config.activeTenantId();
+    if (!tid) return;
+    const lastCheck = Number(DB.getSetting('license_checked_at_' + tid) || 0);
+    if (!force && Date.now() - lastCheck < LICENSE_CHECK_INTERVAL_MS) return;
+    try {
+      const qs = new URLSearchParams({
+        tenant_id: tid, device_id: Config.deviceId(), device_name: Config.deviceName()
+      });
+      const out = await apiFetch('/api/license?' + qs.toString(), { method: 'GET' });
+      if (out && out.token) {
+        DB.setSetting('license_token_' + tid, out.token);
+        DB.setSetting('license_checked_at_' + tid, String(Date.now()));
+        DB.persistNow();
+      }
+    } catch (e) { /* license check is best-effort — never blocks a sale */ }
+    await Config.refreshLicenseState(tid);
+  }
 
   /* ---------- Orchestration ---------- */
   async function run(force) {
@@ -258,6 +328,7 @@ window.Sync = (function () {
     try {
       await pull();
       await push();
+      await refreshLicense(force);
       DB.setSetting('last_sync_at', DB.nowISO());
       DB.persistNow();
       emit({ state: 'synced', pending: pendingCount(), at: DB.getSetting('last_sync_at') });
@@ -298,5 +369,5 @@ window.Sync = (function () {
     return { ok: true, tenants: live.length };
   }
 
-  return { start, run, pullAll, test, queue, pendingCount, onChange, configured, isOnline };
+  return { start, run, pullAll, refreshLicense, test, queue, pendingCount, onChange, configured, isOnline };
 })();

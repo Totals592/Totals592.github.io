@@ -145,12 +145,107 @@ window.Config = (function () {
   }
   function currentRole() { const s = currentSession(); return (s && s.role) || 'cashier'; }
 
+  /* ---------------------------------------------------------------------
+   * Subscription licensing
+   * -----------------------------------------------------------------------
+   * The cloud signs a small token (ECDSA P-256 / ES256, header.payload.sig,
+   * base64url) proving a tenant's plan, expiry and grace-period dates. Only
+   * the cloud holds the PRIVATE key (a Supabase secret); this public key is
+   * safe to ship — it can verify a signature but never forge one. The token
+   * is verified and its dates evaluated entirely on-device, so licensing
+   * works fully offline once a token has been cached: no sale ever needs a
+   * network call. Only *renewing* that cached token (picking up a plan
+   * change, extension, or cancellation) needs occasional connectivity.
+   * ------------------------------------------------------------------- */
+  const LICENSE_PUBLIC_KEY_SPKI_B64 =
+    'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEmAewAuLvcsTT60/sDlwPRfNQ/fxVgCgNIUUTlc/BcFceVvwHr4wHPL+DZdLckkOxwmhpyKjViHz3jf8gjLp8Sw==';
+
+  let _licensePubKey = null;
+  async function importLicensePublicKey() {
+    if (_licensePubKey) return _licensePubKey;
+    const raw = Uint8Array.from(atob(LICENSE_PUBLIC_KEY_SPKI_B64), (c) => c.charCodeAt(0));
+    _licensePubKey = await crypto.subtle.importKey(
+      'spki', raw.buffer, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+    return _licensePubKey;
+  }
+  function b64urlToBytes(s) {
+    s = String(s || '').replace(/-/g, '+').replace(/_/g, '/');
+    while (s.length % 4) s += '=';
+    return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+  }
+
+  // Verify a cached token's signature and decode its payload. Returns null
+  // for anything malformed, tampered, or signed by a different key — never
+  // throws, so a corrupt cache can never crash the app.
+  async function verifyLicenseToken(token) {
+    try {
+      const parts = String(token || '').split('.');
+      if (parts.length !== 3) return null;
+      const [h, p, s] = parts;
+      const key = await importLicensePublicKey();
+      const data = new TextEncoder().encode(h + '.' + p);
+      const ok = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, b64urlToBytes(s), data);
+      if (!ok) return null;
+      return JSON.parse(new TextDecoder().decode(b64urlToBytes(p)));
+    } catch (e) { return null; }
+  }
+
+  // Turn a verified payload into a live state relative to THIS device's
+  // clock — dates are only meaningful evaluated "now", not frozen at the
+  // moment the token was issued (it may be days or weeks old).
+  //   active  -> normal use; warning=true inside the last 5 days
+  //   grace   -> past expiry, still usable, inside the 5-day grace window
+  //   locked  -> past grace (or explicitly canceled) — hard lock
+  function computeLicenseState(payload) {
+    if (!payload) return { known: false, state: 'active', plan: null, entitlements: {} };
+    const now = new Date();
+    const expiresAt = payload.expires_at ? new Date(payload.expires_at) : null;
+    const graceUntil = payload.grace_until ? new Date(payload.grace_until) : null;
+    let state;
+    if (payload.canceled) state = 'locked';
+    else if (!expiresAt || now <= expiresAt) state = 'active';
+    else if (graceUntil && now <= graceUntil) state = 'grace';
+    else state = 'locked';
+    const daysLeft = expiresAt ? Math.ceil((expiresAt - now) / 86400000) : null;
+    const graceDaysLeft = graceUntil ? Math.ceil((graceUntil - now) / 86400000) : null;
+    return {
+      known: true, state, plan: payload.plan || 'trial',
+      entitlements: payload.entitlements || {},
+      expiresAt, graceUntil, daysLeft, graceDaysLeft,
+      warning: state === 'active' && daysLeft != null && daysLeft <= 5,
+      tenantId: payload.tenant_id
+    };
+  }
+
+  // Last-computed state per tenant id, kept in memory so the UI can read it
+  // synchronously during render without awaiting crypto on every paint.
+  // {} (unknown/active/no entitlements) until the first refresh completes —
+  // a brand-new, never-yet-synced device is never blocked before licensing
+  // has had a chance to activate.
+  const _licenseStates = {};
+  function getLicenseState(tenantId) {
+    const id = tenantId || activeTenantId();
+    return _licenseStates[id] || { known: false, state: 'active', plan: null, entitlements: {} };
+  }
+  // Re-verify the cached token for a tenant and refresh the in-memory state.
+  // Called at boot and after every sync; safe to call anytime (idempotent).
+  async function refreshLicenseState(tenantId) {
+    const id = tenantId || activeTenantId();
+    if (!id) return getLicenseState(id);
+    const token = DB.getSetting('license_token_' + id);
+    const payload = await verifyLicenseToken(token);
+    const st = computeLicenseState(payload);
+    _licenseStates[id] = st;
+    return st;
+  }
+
   return {
     CURRENCY_SYMBOLS, money, vatBreakdown,
     activeTenantId, activeTenant, setActiveTenant,
     apiBase, deviceName, deviceId, cashierName: cashierNameResolved, adminPin,
     DEFAULT_API_BASE, effectivePrice, hasDiscount,
     nextReceiptNo, nextOrderNo, todayKey, escapeHtml,
-    randomSalt, hashPin, currentSession, setSession, currentRole
+    randomSalt, hashPin, currentSession, setSession, currentRole,
+    verifyLicenseToken, getLicenseState, refreshLicenseState
   };
 })();
