@@ -30,10 +30,19 @@ const crypto = require('crypto');
 const PORT = process.env.PORT || 4000;
 const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data.json');
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'change-me-admin-token';
+// Subscription license signing (ECDSA P-256 / ES256). The private key never
+// leaves this server; the matching public key is embedded in the client app
+// (js/config.js) so registers can verify a token entirely offline. Generate
+// a keypair once — see docs/MIGRATION-SUPABASE.md "Subscription licensing".
+const LICENSE_PRIVATE_KEY_PKCS8_B64 = process.env.LICENSE_PRIVATE_KEY_PKCS8_B64 || '';
+const GRACE_DAYS = 5;
 
 /* ------------------------------- storage -------------------------------- */
 function emptyDB() {
-  return { seq: 0, tenants: {}, products: {}, variations: {}, staff: {}, sales: {}, sale_items: {}, alerts: [] };
+  return {
+    seq: 0, tenants: {}, products: {}, variations: {}, staff: {}, sales: {}, sale_items: {}, alerts: [],
+    subscriptions: {}, subscription_audit_log: {}, devices: {}
+  };
 }
 let db = emptyDB();
 try {
@@ -89,6 +98,66 @@ function checkLowStock(v) {
   }
 }
 
+function upsertSubscription(s) {
+  const cur = db.subscriptions[s.tenant_id] || {};
+  db.subscriptions[s.tenant_id] = touch(Object.assign(cur, s, { updated_at: s.updated_at || nowISO() }));
+}
+
+/* ---------------------- subscription license signing -------------------- */
+const { webcrypto } = crypto;
+let _licenseKeyPromise = null;
+function getLicensePrivateKey() {
+  if (!LICENSE_PRIVATE_KEY_PKCS8_B64) return null;
+  if (!_licenseKeyPromise) {
+    const raw = Buffer.from(LICENSE_PRIVATE_KEY_PKCS8_B64, 'base64');
+    _licenseKeyPromise = webcrypto.subtle.importKey(
+      'pkcs8', raw, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+  }
+  return _licenseKeyPromise;
+}
+function b64url(bufOrString) {
+  const buf = Buffer.isBuffer(bufOrString) ? bufOrString
+    : Buffer.from(bufOrString instanceof ArrayBuffer ? Buffer.from(bufOrString) : String(bufOrString));
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+async function signLicenseToken(payload) {
+  const key = await getLicensePrivateKey();
+  if (!key) throw new Error('LICENSE_PRIVATE_KEY_PKCS8_B64 is not set on this server');
+  const h = b64url(JSON.stringify({ alg: 'ES256', typ: 'LICENSE' }));
+  const p = b64url(JSON.stringify(payload));
+  const sig = await webcrypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, Buffer.from(h + '.' + p));
+  return h + '.' + p + '.' + b64url(Buffer.from(sig));
+}
+// Look up (creating a default 3-day full-access trial if none exists yet, so
+// a brand-new shop is immediately usable) and sign a license for a tenant.
+async function issueLicense(tenantId) {
+  let sub = db.subscriptions[tenantId];
+  if (!sub) {
+    const now = nowISO();
+    const expires = new Date(Date.now() + 3 * 86400000).toISOString();
+    const grace = new Date(new Date(expires).getTime() + GRACE_DAYS * 86400000).toISOString();
+    sub = touch({
+      tenant_id: tenantId, plan: 'trial', status: 'active', started_at: now,
+      expires_at: expires, grace_until: grace,
+      entitlements: { analytics: true, remote_sales: true, import_inventory: true, expiry_tracking: true },
+      created_at: now
+    });
+    db.subscriptions[tenantId] = sub;
+    const auditId = uid('slog');
+    db.subscription_audit_log[auditId] = touch({
+      id: auditId, tenant_id: tenantId, action: 'created', from_plan: null, to_plan: 'trial',
+      from_expires: null, to_expires: expires, note: 'auto-issued 3-day trial', at: now
+    });
+    save();
+  }
+  const payload = {
+    tenant_id: tenantId, plan: sub.plan, canceled: sub.status === 'canceled',
+    expires_at: sub.expires_at, grace_until: sub.grace_until,
+    entitlements: sub.entitlements || {}, issued_at: nowISO()
+  };
+  return signLicenseToken(payload);
+}
+
 // Apply a single change coming from a register's outbox.
 function applyChange(ch) {
   const p = ch.payload || {};
@@ -100,6 +169,12 @@ function applyChange(ch) {
       if (ch.op === 'delete' && db.products[ch.entity_id]) db.products[ch.entity_id].active = 0;
       break;
     case 'staff': upsertStaff(Object.assign({ id: ch.entity_id }, p)); break;
+    case 'subscription': upsertSubscription(Object.assign({ tenant_id: ch.entity_id }, p)); break;
+    case 'subscription_audit': {
+      const id = ch.entity_id;
+      if (!db.subscription_audit_log[id]) db.subscription_audit_log[id] = touch(Object.assign({ id }, p));
+      break;
+    }
     case 'stock': {
       const v = db.variations[ch.entity_id];
       if (v) {
@@ -174,7 +249,34 @@ const server = http.createServer(async (req, res) => {
     // Sales + line items now replicate to every device.
     const salesArr = Object.values(db.sales).filter((x) => (x.seq || 0) > cur('sales'));
     const itemsArr = Object.values(db.sale_items).filter((x) => (x.seq || 0) > cur('sale_items'));
-    return send(res, 200, { cursor: db.seq, tenants, products, variations, staff, sales: salesArr, sale_items: itemsArr });
+    const subscriptions = Object.values(db.subscriptions).filter((x) => (x.seq || 0) > cur('subscriptions'));
+    const subscription_audit_log = Object.values(db.subscription_audit_log).filter((x) => (x.seq || 0) > cur('subscription_audit_log'));
+    const devices = Object.values(db.devices).filter((x) => (x.seq || 0) > cur('devices'));
+    return send(res, 200, {
+      cursor: db.seq, tenants, products, variations, staff, sales: salesArr, sale_items: itemsArr,
+      subscriptions, subscription_audit_log, devices
+    });
+  }
+
+  // ---- Subscription license check-in (also records device visibility) ----
+  if (p === '/api/license' && req.method === 'GET') {
+    const q = url.searchParams;
+    const tid = q.get('tenant_id');
+    if (!tid) return send(res, 400, { error: 'tenant_id required' });
+    const deviceId = q.get('device_id');
+    if (deviceId) {
+      const cur = db.devices[deviceId] || { device_id: deviceId, tenant_id: tid, first_seen: nowISO() };
+      db.devices[deviceId] = touch(Object.assign(cur, {
+        tenant_id: tid, device_name: q.get('device_name') || cur.device_name, last_seen: nowISO()
+      }));
+    }
+    try {
+      const token = await issueLicense(tid);
+      save();
+      return send(res, 200, { token });
+    } catch (e) {
+      return send(res, 500, { error: e.message });
+    }
   }
 
   // ---- Low-stock alerts (reordering) ----
@@ -301,4 +403,5 @@ server.listen(PORT, () => {
   console.log('  Admin portal:  http://localhost:' + PORT + '/admin');
   console.log('  Data file:     ' + DATA_FILE);
   if (ADMIN_TOKEN === 'change-me-admin-token') console.warn('  ⚠  Set ADMIN_TOKEN env var before deploying!');
+  if (!LICENSE_PRIVATE_KEY_PKCS8_B64) console.warn('  ⚠  LICENSE_PRIVATE_KEY_PKCS8_B64 not set — /api/license will fail. See docs/MIGRATION-SUPABASE.md.');
 });

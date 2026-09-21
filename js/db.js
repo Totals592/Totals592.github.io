@@ -115,6 +115,7 @@ window.DB = (function () {
     analytics_enabled INTEGER DEFAULT 0,
     remote_sales_enabled INTEGER DEFAULT 1,
     import_inventory_enabled INTEGER DEFAULT 0,
+    expiry_tracking_enabled INTEGER DEFAULT 0,
     categories TEXT,
     receipt_footer TEXT,
     logo TEXT,
@@ -225,6 +226,49 @@ window.DB = (function () {
     created_at TEXT
   );
 
+  /* One row per tenant: the platform-admin-managed subscription that gates
+     use of the app. Plan/status/dates are set by the Admin tab and re-issued
+     as a signed license token by the cloud; this local copy is what the
+     Admin's Subscription modal and the audit trail read from. The actual
+     enforcement uses the verified token cached in settings (license_token),
+     not this table directly, so it still works fully offline. */
+  CREATE TABLE IF NOT EXISTS subscriptions (
+    tenant_id TEXT PRIMARY KEY,
+    plan TEXT DEFAULT 'trial',
+    status TEXT DEFAULT 'active',
+    started_at TEXT,
+    expires_at TEXT,
+    grace_until TEXT,
+    entitlements TEXT,
+    updated_at TEXT,
+    created_at TEXT
+  );
+
+  /* Every subscription change (created, plan changed, renewed, canceled), for
+     accountability — who/when/what changed. */
+  CREATE TABLE IF NOT EXISTS subscription_audit_log (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    from_plan TEXT,
+    to_plan TEXT,
+    from_expires TEXT,
+    to_expires TEXT,
+    note TEXT,
+    at TEXT
+  );
+
+  /* Devices seen per tenant (visibility/audit only — no cap enforced). Written
+     server-side as a side effect of a license check-in; never pushed from a
+     register, only pulled down for the Admin tab to display. */
+  CREATE TABLE IF NOT EXISTS devices (
+    device_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    device_name TEXT,
+    first_seen TEXT,
+    last_seen TEXT
+  );
+
   /* Durable outbox: every change that must reach the cloud lands here. */
   CREATE TABLE IF NOT EXISTS sync_queue (
     id TEXT PRIMARY KEY,
@@ -244,6 +288,8 @@ window.DB = (function () {
   CREATE INDEX IF NOT EXISTS idx_sales_tenant ON sales(tenant_id);
   CREATE INDEX IF NOT EXISTS idx_items_sale ON sale_items(sale_id);
   CREATE INDEX IF NOT EXISTS idx_staff_tenant ON staff(tenant_id);
+  CREATE INDEX IF NOT EXISTS idx_audit_tenant ON subscription_audit_log(tenant_id);
+  CREATE INDEX IF NOT EXISTS idx_devices_tenant ON devices(tenant_id);
   `;
 
   /* ---------- Query helpers ---------- */
@@ -375,6 +421,7 @@ window.DB = (function () {
     ensureColumn('staff', 'can_view_sales', 'INTEGER DEFAULT 0');
     ensureColumn('staff', 'can_manage_inventory', 'INTEGER DEFAULT 0');
     ensureColumn('tenants', 'import_inventory_enabled', 'INTEGER DEFAULT 0');
+    ensureColumn('tenants', 'expiry_tracking_enabled', 'INTEGER DEFAULT 0');
   }
 
   // Settings that describe THIS DEVICE, not shop/tenant data — preserved

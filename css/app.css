@@ -219,6 +219,16 @@ table.data th { color: var(--muted); font-weight: 600; position: sticky; top: 0;
 .login-err { color: #fca5a5; font-size: 13px; min-height: 18px; margin-top: 8px; text-align: center; }
 .hidden-role { display: none !important; }
 
+/* ---------- Subscription lock + banner ---------- */
+.license-lock-back { position: fixed; inset: 0; z-index: 95; display: none; align-items: center; justify-content: center;
+  padding: 18px; background: radial-gradient(1200px 600px at 50% -10%, var(--login-a), var(--bg)); }
+.license-lock-back.open { display: flex; }
+#licenseLockDetails { text-align: left; }
+.license-banner { margin-top: 12px; padding: 12px 14px; border-radius: var(--radius); font-size: 13px;
+  font-weight: 600; border: 1px solid var(--line); }
+.license-banner.warn { background: var(--warn-bg); color: var(--warn-fg); border-color: var(--warn-line); }
+.license-banner.grace { background: var(--danger-bg); color: var(--danger-fg); border-color: var(--danger-line); }
+
 /* ---------- Scanner ---------- */
 .scanner { position: relative; width: 100%; aspect-ratio: 4 / 3; background: #000; border-radius: 12px;
   overflow: hidden; border: 1px solid var(--line); }

@@ -70,6 +70,7 @@ create table if not exists tenants (
   analytics_enabled int default 0,
   remote_sales_enabled int default 1,
   import_inventory_enabled int default 0,
+  expiry_tracking_enabled int default 0,
   categories text,
   receipt_footer text,
   logo text,
@@ -134,6 +135,29 @@ create table if not exists sale_items (
   updated_at timestamptz, seq bigserial
 );
 
+-- Subscription licensing (see section "Subscription licensing" below).
+create table if not exists subscriptions (
+  tenant_id text primary key references tenants(id),
+  plan text default 'trial', status text default 'active',
+  started_at timestamptz, expires_at timestamptz, grace_until timestamptz,
+  entitlements jsonb,
+  updated_at timestamptz, created_at timestamptz, seq bigserial
+);
+
+create table if not exists subscription_audit_log (
+  id text primary key, tenant_id text not null references tenants(id),
+  action text not null, from_plan text, to_plan text,
+  from_expires timestamptz, to_expires timestamptz, note text,
+  at timestamptz, seq bigserial
+);
+
+-- Devices seen per tenant (visibility only — no cap enforced), recorded by
+-- the license endpoint as a side effect of a check-in.
+create table if not exists devices (
+  device_id text primary key, tenant_id text not null references tenants(id),
+  device_name text, first_seen timestamptz, last_seen timestamptz, seq bigserial
+);
+
 create index if not exists idx_sales_seq on sales(seq);
 create index if not exists idx_sale_items_seq on sale_items(seq);
 
@@ -168,7 +192,7 @@ end $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['tenants','products','variations','staff','sales','sale_items']
+  foreach t in array array['tenants','products','variations','staff','sales','sale_items','subscriptions','devices']
   loop
     execute format('drop trigger if exists %I_bump_seq on %I', t, t);
     execute format('create trigger %I_bump_seq before update on %I
@@ -191,6 +215,12 @@ alter table sale_items add column if not exists list_price numeric;
 alter table staff      add column if not exists can_view_sales int default 0;
 alter table staff      add column if not exists can_manage_inventory int default 0;
 alter table tenants    add column if not exists import_inventory_enabled int default 0;
+alter table tenants    add column if not exists expiry_tracking_enabled int default 0;
+
+-- If you don't have these tables yet (added for subscription licensing),
+-- run the three `create table if not exists` statements for subscriptions,
+-- subscription_audit_log and devices from section 2 above, then re-run 2a
+-- (the bump_seq trigger loop now also covers 'subscriptions' and 'devices').
 ```
 
 ## 3. The sync API — Supabase Edge Function
@@ -217,6 +247,66 @@ const cors = {
 };
 const json = (b: unknown, s = 200) =>
   new Response(JSON.stringify(b), { status: s, headers: { ...cors, "content-type": "application/json" } });
+
+/* ---------------- Subscription license signing (ECDSA P-256 / ES256) ----
+ * The PRIVATE key lives only here (a Supabase secret); js/config.js in the
+ * app embeds the matching PUBLIC key to verify tokens fully offline. See
+ * "Subscription licensing" below for how to generate/set the keypair. */
+const GRACE_DAYS = 5;
+let _licenseKeyPromise: Promise<CryptoKey> | null = null;
+function b64urlToBytes(s: string): Uint8Array {
+  s = s.replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+}
+function bytesToB64url(bytes: ArrayBuffer | Uint8Array): string {
+  return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function getLicensePrivateKey(): Promise<CryptoKey> {
+  if (!_licenseKeyPromise) {
+    // NOTE: this is STANDARD base64 (as produced when the keypair was
+    // generated), not base64url — do not run it through b64urlToBytes.
+    const b64 = Deno.env.get("LICENSE_PRIVATE_KEY_PKCS8_B64");
+    if (!b64) throw new Error("LICENSE_PRIVATE_KEY_PKCS8_B64 is not set");
+    const raw = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    _licenseKeyPromise = crypto.subtle.importKey(
+      "pkcs8", raw, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]
+    );
+  }
+  return _licenseKeyPromise;
+}
+async function signLicenseToken(payload: Record<string, unknown>): Promise<string> {
+  const key = await getLicensePrivateKey();
+  const h = bytesToB64url(new TextEncoder().encode(JSON.stringify({ alg: "ES256", typ: "LICENSE" })));
+  const p = bytesToB64url(new TextEncoder().encode(JSON.stringify(payload)));
+  const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, new TextEncoder().encode(h + "." + p));
+  return h + "." + p + "." + bytesToB64url(sig);
+}
+// Look up (creating a default 3-day full-access trial if none exists yet, so
+// a brand-new shop is immediately usable) and sign a license for a tenant.
+async function issueLicense(tenantId: string): Promise<string> {
+  let { data: sub } = await db.from("subscriptions").select("*").eq("tenant_id", tenantId).maybeSingle();
+  if (!sub) {
+    const now = new Date();
+    const expires = new Date(now.getTime() + 3 * 86400000);
+    const grace = new Date(expires.getTime() + GRACE_DAYS * 86400000);
+    sub = {
+      tenant_id: tenantId, plan: "trial", status: "active",
+      started_at: now.toISOString(), expires_at: expires.toISOString(), grace_until: grace.toISOString(),
+      entitlements: { analytics: true, remote_sales: true, import_inventory: true, expiry_tracking: true }
+    };
+    await db.from("subscriptions").upsert(sub);
+    await db.from("subscription_audit_log").insert({
+      id: crypto.randomUUID(), tenant_id: tenantId, action: "created", to_plan: "trial",
+      to_expires: sub.expires_at, note: "auto-issued 3-day trial", at: now.toISOString()
+    });
+  }
+  return signLicenseToken({
+    tenant_id: tenantId, plan: sub.plan, canceled: sub.status === "canceled",
+    expires_at: sub.expires_at, grace_until: sub.grace_until,
+    entitlements: sub.entitlements || {}, issued_at: new Date().toISOString()
+  });
+}
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -247,6 +337,8 @@ serve(async (req) => {
           if (p.items) for (const it of p.items)
             await db.from("sale_items").upsert({ id: it.id || crypto.randomUUID(), sale_id: ch.entity_id, ...it });
         }
+        else if (ch.entity === "subscription") await db.from("subscriptions").upsert({ tenant_id: ch.entity_id, ...p });
+        else if (ch.entity === "subscription_audit") await db.from("subscription_audit_log").upsert({ id: ch.entity_id, ...p });
         applied.push(ch.id);
       } catch (_) { /* leave un-applied; the register retries */ }
     }
@@ -266,7 +358,38 @@ serve(async (req) => {
     const staff = await pick("staff");
     const sales = await pick("sales");           // sales now replicate to every device
     const sale_items = await pick("sale_items");
-    return json({ tenants, products, variations, staff, sales, sale_items });
+    const subscriptions = await pick("subscriptions");
+    const subscription_audit_log = await pick("subscription_audit_log");
+    const devices = await pick("devices");
+    return json({ tenants, products, variations, staff, sales, sale_items, subscriptions, subscription_audit_log, devices });
+  }
+
+  // LICENSE: sign a fresh token for a tenant's current subscription state,
+  // and record the requesting device (visibility only, no cap enforced).
+  // See "Subscription licensing" below for how LICENSE_PRIVATE_KEY_B64 is set.
+  if (url.pathname.endsWith("/license") && req.method === "GET") {
+    const tid = url.searchParams.get("tenant_id");
+    if (!tid) return json({ error: "tenant_id required" }, 400);
+    const deviceId = url.searchParams.get("device_id");
+    if (deviceId) {
+      const now = new Date().toISOString();
+      const { data: existing } = await db.from("devices").select("device_id").eq("device_id", deviceId).maybeSingle();
+      // first_seen is set only on the very first check-in: omitting a key
+      // (undefined is dropped by JSON.stringify) keeps PostgREST's upsert from
+      // touching that column on an existing row, so it's never reset.
+      await db.from("devices").upsert({
+        device_id: deviceId, tenant_id: tid,
+        device_name: url.searchParams.get("device_name"),
+        ...(existing ? {} : { first_seen: now }),
+        last_seen: now
+      });
+    }
+    try {
+      const token = await issueLicense(tid);
+      return json({ token });
+    } catch (e) {
+      return json({ error: String((e as Error).message || e) }, 500);
+    }
   }
 
   return json({ error: "not found" }, 404);
@@ -287,6 +410,38 @@ in the **app** set the Cloud API base URL to the domain only —
 `https://<project-ref>.functions.supabase.co` — because the app appends
 `/api/sync` and `/api/pull` itself. Name the function `api` and turn its
 **Verify JWT** setting OFF for the test milestone.
+
+### 3a. Subscription licensing — one-time key setup
+
+The subscription system (Admin → Subscription, per-shop plan/expiry/grace)
+proves a device's license with a **signed token** (ECDSA P-256 / ES256) rather
+than a plain database flag, so it can't be unlocked by editing local data —
+only someone holding the private key can produce a token that verifies.
+
+- The **public** key is already embedded in the app (`js/config.js`,
+  `LICENSE_PUBLIC_KEY_SPKI_B64`) — safe to ship, it can only verify, never sign.
+- The **private** key must never appear in this repo, the app, or any commit.
+  It lives only as a Supabase secret, read solely inside the Edge Function.
+
+Set the matching private key (generated once for this app; keep it only here):
+
+```bash
+supabase secrets set LICENSE_PRIVATE_KEY_PKCS8_B64="<the private key value your admin has>" --project-ref <your-project-ref>
+supabase functions deploy api --no-verify-jwt
+```
+
+(If you don't have the private key value, or ever suspect it's leaked, a new
+keypair can be generated — but the embedded public key in `js/config.js` would
+need updating and redeploying to match, or every device's cached license stops
+verifying. Don't rotate it without also shipping the new public key.)
+
+**Quick check it worked:** Admin → unlock → open a tenant's **Subscription**
+button → set a plan (e.g. Extra, 6 months) → Save. It syncs and fetches a
+license automatically; **Settings → Subscription** on that shop's register
+should show the plan, status "Active", and matching dates within a few
+seconds (once online). If it instead stays on "No subscription information
+cached yet", check the Edge Function logs (Supabase Dashboard → Edge
+Functions → api → Logs) for a `LICENSE_PRIVATE_KEY_PKCS8_B64 is not set` error.
 
 ## 4. Point the app at the sync API
 

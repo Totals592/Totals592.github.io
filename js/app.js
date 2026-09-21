@@ -1154,12 +1154,17 @@
     $('#tenantTable tbody').innerHTML = rows.map((t) => {
       const pc = DB.get('SELECT COUNT(*) AS n FROM products WHERE tenant_id=? AND active=1', [t.id]);
       const statusBadge = t.status === 'suspended' ? '<span class="badge suspended">Suspended</span>' : '<span class="badge ok">Active</span>';
+      const sub = subEffective(t.id);
+      const subBadge = sub
+        ? `<span class="badge ${sub.state === 'active' ? 'ok' : sub.state === 'grace' ? 'suspended' : 'low'}">${esc(sub.plan)} · ${esc(sub.state)}</span>`
+        : '<span class="badge">No subscription</span>';
       return `<tr>
         <td>${esc(t.name)}<div class="muted" style="font-size:12px">${esc(t.address || '')}</div></td>
         <td>${esc(t.tin || '—')}</td><td>${esc(t.phone || '')}</td><td>${pc ? pc.n : 0}</td>
-        <td>${statusBadge}</td>
+        <td>${statusBadge}<div style="margin-top:4px">${subBadge}</div></td>
         <td><div class="row-actions">
           <button class="btn small" data-edittenant="${t.id}">Edit</button>
+          <button class="btn small" data-subtenant="${t.id}">Subscription</button>
           <button class="btn small" data-stafftenant="${t.id}">Staff</button>
           <button class="btn small" data-usetenant="${t.id}">Open</button>
           <button class="btn small ${t.status === 'suspended' ? 'brand' : 'danger'}" data-toggletenant="${t.id}">${t.status === 'suspended' ? 'Activate' : 'Suspend'}</button>
@@ -1167,6 +1172,24 @@
         </div></td>
       </tr>`;
     }).join('');
+  }
+
+  // Plain date-math subscription summary for the Admin's own view (not the
+  // cryptographically-verified path — that's only needed for register
+  // enforcement; the admin already trusts their own local data for management).
+  function subEffective(tid) {
+    const s = DB.get('SELECT * FROM subscriptions WHERE tenant_id=?', [tid]);
+    if (!s) return null;
+    const now = new Date();
+    const expiresAt = s.expires_at ? new Date(s.expires_at) : null;
+    const graceUntil = s.grace_until ? new Date(s.grace_until) : null;
+    let state;
+    if (s.status === 'canceled') state = 'locked';
+    else if (!expiresAt || now <= expiresAt) state = 'active';
+    else if (graceUntil && now <= graceUntil) state = 'grace';
+    else state = 'locked';
+    return { plan: s.plan, state, expiresAt, graceUntil,
+      daysLeft: expiresAt ? Math.ceil((expiresAt - now) / 86400000) : null };
   }
   function tenantModal(tid) {
     const editing = !!tid;
@@ -1201,6 +1224,8 @@
         <label class="switch" style="margin-top:10px"><input type="checkbox" id="tAnalytics" ${t.analytics_enabled === 1 ? 'checked' : ''}> Enable Report Analytics (paid tier)</label>
         <label class="switch"><input type="checkbox" id="tRemoteSales" ${(t.remote_sales_enabled ?? 1) !== 0 ? 'checked' : ''}> Managers can see real-time sales from all devices</label>
         <label class="switch"><input type="checkbox" id="tImportInventory" ${t.import_inventory_enabled === 1 ? 'checked' : ''}> Allow creating inventory from imported sales (paid tier)</label>
+        <label class="switch"><input type="checkbox" id="tExpiryTracking" ${t.expiry_tracking_enabled === 1 ? 'checked' : ''}> Enable product expiration tracking (paid tier)</label>
+        <p class="hint">These usually come from the shop's <b>Subscription</b> (see the Subscription button in the tenant list) — set them there so Plan and these stay in sync; only override an individual one here if you need an exception.</p>
       </div>
       <div class="foot"><button class="btn ghost" data-close>Cancel</button><button class="btn brand" id="tSave">Save</button></div>`, true);
     const m = $('#modal');
@@ -1217,17 +1242,18 @@
         status: $('#tStatus', m).value, receipt_footer: $('#tFooter', m).value.trim(),
         analytics_enabled: $('#tAnalytics', m).checked ? 1 : 0,
         remote_sales_enabled: $('#tRemoteSales', m).checked ? 1 : 0,
-        import_inventory_enabled: $('#tImportInventory', m).checked ? 1 : 0
+        import_inventory_enabled: $('#tImportInventory', m).checked ? 1 : 0,
+        expiry_tracking_enabled: $('#tExpiryTracking', m).checked ? 1 : 0
       };
       let id = tid;
       if (editing) {
-        DB.run(`UPDATE tenants SET name=?,tin=?,slug=?,phone=?,email=?,address=?,currency=?,vat_rate=?,vat_inclusive=?,status=?,receipt_footer=?,analytics_enabled=?,remote_sales_enabled=?,import_inventory_enabled=?,updated_at=? WHERE id=?`,
-          [vals.name, vals.tin, vals.slug, vals.phone, vals.email, vals.address, vals.currency, vals.vat_rate, vals.vat_inclusive, vals.status, vals.receipt_footer, vals.analytics_enabled, vals.remote_sales_enabled, vals.import_inventory_enabled, now, tid]);
+        DB.run(`UPDATE tenants SET name=?,tin=?,slug=?,phone=?,email=?,address=?,currency=?,vat_rate=?,vat_inclusive=?,status=?,receipt_footer=?,analytics_enabled=?,remote_sales_enabled=?,import_inventory_enabled=?,expiry_tracking_enabled=?,updated_at=? WHERE id=?`,
+          [vals.name, vals.tin, vals.slug, vals.phone, vals.email, vals.address, vals.currency, vals.vat_rate, vals.vat_inclusive, vals.status, vals.receipt_footer, vals.analytics_enabled, vals.remote_sales_enabled, vals.import_inventory_enabled, vals.expiry_tracking_enabled, now, tid]);
       } else {
         id = DB.uid('ten');
-        DB.run(`INSERT INTO tenants(id,name,tin,slug,phone,email,address,currency,vat_rate,vat_inclusive,status,receipt_footer,analytics_enabled,remote_sales_enabled,import_inventory_enabled,updated_at,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [id, vals.name, vals.tin, vals.slug, vals.phone, vals.email, vals.address, vals.currency, vals.vat_rate, vals.vat_inclusive, vals.status, vals.receipt_footer, vals.analytics_enabled, vals.remote_sales_enabled, vals.import_inventory_enabled, now, now]);
+        DB.run(`INSERT INTO tenants(id,name,tin,slug,phone,email,address,currency,vat_rate,vat_inclusive,status,receipt_footer,analytics_enabled,remote_sales_enabled,import_inventory_enabled,expiry_tracking_enabled,updated_at,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [id, vals.name, vals.tin, vals.slug, vals.phone, vals.email, vals.address, vals.currency, vals.vat_rate, vals.vat_inclusive, vals.status, vals.receipt_footer, vals.analytics_enabled, vals.remote_sales_enabled, vals.import_inventory_enabled, vals.expiry_tracking_enabled, now, now]);
         // Give a brand-new shop a default manager login (change the PIN after).
         await createStaff(id, { name: 'Manager', username: 'manager', pin: '1234', role: 'manager' });
       }
@@ -1424,7 +1450,7 @@
       can_view_sales: staff.can_view_sales ? 1 : 0, can_manage_inventory: staff.can_manage_inventory ? 1 : 0 });
   }
 
-  function signInAs(session) {
+  async function signInAs(session) {
     // A new sign-in never inherits a previous admin unlock; the Admin tab must
     // be unlocked again with the device PIN (unless this is an admin override).
     if (session.admin) sessionStorage.setItem('admin_ok', '1');
@@ -1436,8 +1462,10 @@
     cart = [];
     applyRoleGating();
     updateTopbar();
+    await Config.refreshLicenseState(session.tenant_id);
+    refreshLicenseUI();
     renderPOS(); renderCart();
-    switchView('pos');
+    switchView(isHardLocked() ? 'admin' : 'pos');
     toast('Signed in — ' + session.name, 'ok');
   }
 
@@ -1627,6 +1655,126 @@
     $$('[data-astaffdel]', m).forEach((b) => b.addEventListener('click', () => deleteStaff(b.dataset.astaffdel, rerender)));
   }
 
+  /* ---------------- Subscriptions (Admin) ---------------- */
+  const PLAN_ENTITLEMENTS = {
+    trial: { analytics: true, remote_sales: true, import_inventory: true, expiry_tracking: true },
+    extra: { analytics: true, remote_sales: true, import_inventory: true, expiry_tracking: true },
+    basic: { analytics: false, remote_sales: false, import_inventory: false, expiry_tracking: false }
+  };
+  const DURATION_DAYS = { '3d': 3, '1m': 30, '3m': 91, '6m': 182, '12m': 365 };
+  const DURATION_LABEL = { '3d': '3 days (trial)', '1m': '1 month', '3m': '3 months', '6m': '6 months', '12m': '12 months' };
+
+  function subscriptionModal(tid) {
+    const t = DB.get('SELECT * FROM tenants WHERE id = ?', [tid]);
+    const existing = DB.get('SELECT * FROM subscriptions WHERE tenant_id = ?', [tid]);
+    const eff = subEffective(tid);
+    const devices = DB.all('SELECT * FROM devices WHERE tenant_id = ? ORDER BY last_seen DESC LIMIT 10', [tid]);
+    const audit = DB.all('SELECT * FROM subscription_audit_log WHERE tenant_id = ? ORDER BY at DESC LIMIT 15', [tid]);
+    const canExtend = eff && eff.state !== 'locked';
+
+    openModal(`
+      <header><h3>Subscription · ${esc(t.name)}</h3><button class="x" data-close>×</button></header>
+      <div class="body">
+        <div class="kpis" style="margin-bottom:14px">
+          ${kpi(eff ? eff.plan.charAt(0).toUpperCase() + eff.plan.slice(1) : '—', 'Plan')}
+          ${kpi(eff ? eff.state.charAt(0).toUpperCase() + eff.state.slice(1) : 'None', 'Status')}
+          ${kpi(eff ? fmtDate(eff.expiresAt) : '—', 'Expires')}
+          ${kpi(eff ? fmtDate(eff.graceUntil) : '—', 'Grace ends')}
+        </div>
+        <h3 style="margin:0 0 8px">Set / renew subscription</h3>
+        <div class="grid2">
+          <div><label>Plan</label>
+            <select id="subPlan">
+              <option value="trial">Trial — full access</option>
+              <option value="basic">Basic — core POS only</option>
+              <option value="extra" selected>Extra — all paid features</option>
+            </select>
+          </div>
+          <div><label>Duration</label>
+            <select id="subDuration">
+              <option value="3d">3 days (trial)</option>
+              <option value="1m">1 month</option>
+              <option value="3m">3 months</option>
+              <option value="6m" selected>6 months</option>
+              <option value="12m">12 months</option>
+            </select>
+          </div>
+        </div>
+        ${canExtend ? `<label class="switch"><input type="checkbox" id="subExtend" checked> Extend from current expiry (renewal) — unchecked starts fresh from today</label>` : ''}
+        <button class="btn brand" id="subSaveBtn" style="margin-top:10px">Save subscription</button>
+        <p class="hint">Saving updates this shop's Analytics / multi-device sales / import-to-inventory / expiration-tracking access to match the plan, and queues a signed license for the shop's registers to pick up on their next sync.</p>
+
+        <h3 style="margin:18px 0 8px">Devices seen (visibility only, no limit enforced)</h3>
+        <div class="table-wrap"><table class="data"><thead><tr><th>Device</th><th>Last seen</th></tr></thead>
+          <tbody>${devices.map((d) => `<tr><td>${esc(d.device_name || d.device_id)}</td><td>${new Date(d.last_seen).toLocaleString()}</td></tr>`).join('')
+            || '<tr><td colspan="2" class="muted center">No check-ins yet.</td></tr>'}</tbody></table></div>
+
+        <h3 style="margin:18px 0 8px">Audit log</h3>
+        <div class="table-wrap"><table class="data"><thead><tr><th>When</th><th>Action</th><th>Detail</th></tr></thead>
+          <tbody>${audit.map((a) => `<tr>
+            <td>${new Date(a.at).toLocaleString()}</td><td>${esc(a.action)}</td>
+            <td>${esc(a.from_plan || '—')} → ${esc(a.to_plan || '—')}${a.to_expires ? ' · until ' + fmtDate(a.to_expires) : ''}</td>
+          </tr>`).join('') || '<tr><td colspan="3" class="muted center">No history yet.</td></tr>'}</tbody></table></div>
+      </div>
+      <div class="foot"><button class="btn ghost" data-close>Close</button></div>`, true);
+
+    const m = $('#modal');
+    if (existing) $('#subPlan', m).value = existing.plan;
+    $$('[data-close]', m).forEach((b) => b.addEventListener('click', closeModal));
+    $('#subSaveBtn', m).addEventListener('click', () => {
+      const plan = $('#subPlan', m).value;
+      const durationKey = $('#subDuration', m).value;
+      const extend = canExtend && $('#subExtend', m) && $('#subExtend', m).checked;
+      const now = DB.nowISO();
+      const startBase = (extend && existing && existing.expires_at && new Date(existing.expires_at) > new Date())
+        ? new Date(existing.expires_at) : new Date();
+      const expiresAt = new Date(startBase.getTime() + DURATION_DAYS[durationKey] * 86400000);
+      const graceUntil = new Date(expiresAt.getTime() + 5 * 86400000);
+      const entitlements = PLAN_ENTITLEMENTS[plan];
+
+      DB.run(`INSERT INTO subscriptions(tenant_id,plan,status,started_at,expires_at,grace_until,entitlements,updated_at,created_at)
+              VALUES(?,?,?,?,?,?,?,?,?)
+              ON CONFLICT(tenant_id) DO UPDATE SET plan=excluded.plan,status=excluded.status,started_at=excluded.started_at,
+                expires_at=excluded.expires_at,grace_until=excluded.grace_until,entitlements=excluded.entitlements,updated_at=excluded.updated_at`,
+        [tid, plan, 'active', existing ? existing.started_at : now, expiresAt.toISOString(), graceUntil.toISOString(),
+         JSON.stringify(entitlements), now, existing ? existing.created_at : now]);
+
+      const auditId = DB.uid('slog');
+      const action = !existing ? 'created' : (existing.plan !== plan ? 'plan_changed' : 'renewed');
+      DB.run(`INSERT INTO subscription_audit_log(id,tenant_id,action,from_plan,to_plan,from_expires,to_expires,note,at)
+              VALUES(?,?,?,?,?,?,?,?,?)`,
+        [auditId, tid, action, existing ? existing.plan : null, plan,
+         existing ? existing.expires_at : null, expiresAt.toISOString(), DURATION_LABEL[durationKey], now]);
+
+      // Keep the tenant's existing feature-gate flags in sync with the plan.
+      DB.run(`UPDATE tenants SET analytics_enabled=?, remote_sales_enabled=?, import_inventory_enabled=?, expiry_tracking_enabled=?, updated_at=? WHERE id=?`,
+        [entitlements.analytics ? 1 : 0, entitlements.remote_sales ? 1 : 0, entitlements.import_inventory ? 1 : 0,
+         entitlements.expiry_tracking ? 1 : 0, now, tid]);
+
+      Sync.queue('subscription', tid, existing ? 'update' : 'create', {
+        tenant_id: tid, plan, status: 'active',
+        started_at: existing ? existing.started_at : now,
+        expires_at: expiresAt.toISOString(), grace_until: graceUntil.toISOString(),
+        entitlements, updated_at: now
+      }, tid);
+      Sync.queue('subscription_audit', auditId, 'create', {
+        id: auditId, tenant_id: tid, action, from_plan: existing ? existing.plan : null, to_plan: plan,
+        from_expires: existing ? existing.expires_at : null, to_expires: expiresAt.toISOString(),
+        note: DURATION_LABEL[durationKey], at: now
+      }, tid);
+      Sync.queue('tenant', tid, 'update', {
+        id: tid, analytics_enabled: entitlements.analytics ? 1 : 0, remote_sales_enabled: entitlements.remote_sales ? 1 : 0,
+        import_inventory_enabled: entitlements.import_inventory ? 1 : 0, expiry_tracking_enabled: entitlements.expiry_tracking ? 1 : 0,
+        updated_at: now
+      }, tid);
+
+      DB.persistNow();
+      closeModal(); renderAdmin();
+      toast('Subscription saved — syncing to issue the shop’s license…', 'ok');
+      if (Sync.configured()) Sync.run(true).then(refreshLicenseUI);
+    });
+  }
+
   /* ---------------- Sync diagnostics ---------------- */
   // Compares this device's shops against the server's, and shows the pending
   // outbox, so we can see whether a new shop failed to UPLOAD (stuck in the
@@ -1684,6 +1832,86 @@
   // registers in different lighting and want different themes on each.
   function currentTheme() { return DB.getSetting('theme') === 'light' ? 'light' : 'dark'; }
   function applyTheme(theme) { document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark'; }
+
+  /* ---------------- Subscription / licensing ---------------- */
+  // Everything here reads Config.getLicenseState() — the last cryptographically
+  // verified snapshot of the active tenant's subscription, kept in memory by
+  // js/config.js. It's refreshed over the network opportunistically (see
+  // js/sync.js), but every check below runs off the cached copy, so none of
+  // it ever requires connectivity at the moment it runs.
+
+  function fmtDate(d) { return d ? new Date(d).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '—'; }
+
+  // Bottom-of-Sell-tab banner: nothing normally; an amber heads-up in the
+  // last 5 days before expiry; a red countdown once in the grace period.
+  function renderLicenseBanner() {
+    const el = $('#licenseBanner'); if (!el) return;
+    const st = Config.getLicenseState();
+    if (st.state === 'grace') {
+      el.hidden = false; el.className = 'license-banner grace';
+      const d = st.graceDaysLeft;
+      el.textContent = '⚠ Subscription expired. Service will be disabled in '
+        + (d != null ? d + ' day' + (d === 1 ? '' : 's') : 'a few days') + ' unless renewed.';
+    } else if (st.warning) {
+      el.hidden = false; el.className = 'license-banner warn';
+      const d = st.daysLeft;
+      el.textContent = '⏳ Subscription expires in ' + (d != null ? d + ' day' + (d === 1 ? '' : 's') : 'a few days') + ' — renew to avoid interruption.';
+    } else {
+      el.hidden = true;
+    }
+  }
+
+  // Full-app hard lock once the grace period has fully passed. Admin access
+  // stays reachable (device PIN) so the subscription can be reviewed/renewed;
+  // every other tab is refused while locked and not admin-unlocked.
+  function isHardLocked() { return Config.getLicenseState().state === 'locked'; }
+  // Whether the hard lock should actually apply RIGHT NOW: not once the
+  // device admin PIN has unlocked, and never for an admin-override session
+  // (the platform admin managing/inspecting a locked tenant on their own
+  // authority — the lock exists to stop an unpaid customer, not the admin).
+  function licenseEnforced() {
+    const s = Config.currentSession();
+    return isHardLocked() && !isAdminUnlocked() && !(s && s.admin);
+  }
+  function applyLicenseLock() {
+    const back = $('#licenseLockBack'); if (!back) return;
+    const locked = licenseEnforced();
+    back.classList.toggle('open', locked);
+    if (locked) {
+      const st = Config.getLicenseState();
+      const lines = [];
+      if (st.plan) lines.push('Plan: ' + esc(st.plan.charAt(0).toUpperCase() + st.plan.slice(1)));
+      if (st.expiresAt) lines.push('Expired: ' + fmtDate(st.expiresAt));
+      if (st.graceUntil) lines.push('Grace period ended: ' + fmtDate(st.graceUntil));
+      $('#licenseLockDetails').innerHTML = lines.map((l) => '<div>' + l + '</div>').join('');
+      $('#licenseLockAdminPrompt').hidden = true;
+      $('#licenseLockAdminArea').hidden = false;
+      $('#licenseLockPin').value = '';
+    }
+  }
+  // Re-check everything the subscription state can affect. Call after login,
+  // after every sync, and once at boot.
+  function refreshLicenseUI() {
+    renderLicenseBanner();
+    applyLicenseLock();
+    if ($('#view-settings') && $('#view-settings').classList.contains('active')) renderSubStatus();
+  }
+
+  // Read-only status readout (Settings -> Subscription, and reused for the
+  // lock screen's details above).
+  function renderSubStatus() {
+    const el = $('#subStatusBody'); if (!el) return;
+    const st = Config.getLicenseState();
+    if (!st.known) { el.textContent = 'No subscription information cached yet — connect to the internet once to activate.'; return; }
+    const label = { active: 'Active', grace: 'Grace period', locked: 'Locked — service disabled' }[st.state] || st.state;
+    const rows = [
+      ['Plan', st.plan ? st.plan.charAt(0).toUpperCase() + st.plan.slice(1) : '—'],
+      ['Status', label],
+      ['Expires', fmtDate(st.expiresAt)],
+      ['Grace period ends', fmtDate(st.graceUntil)]
+    ];
+    el.innerHTML = rows.map(([k, v]) => `<div style="display:flex;justify-content:space-between"><span>${k}</span><b>${esc(String(v))}</b></div>`).join('');
+  }
 
   /* ---------------- Status pills ---------------- */
   function updateNetPill() {
@@ -1929,6 +2157,9 @@
 
   /* ---------------- View switching ---------------- */
   function switchView(name) {
+    // Hard-locked and not admin-unlocked: only the Admin tab (device-PIN
+    // gated) is reachable, so a locked shop can still be reviewed/renewed.
+    if (name !== 'admin' && licenseEnforced()) { applyLicenseLock(); return; }
     $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.view === name));
     $$('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + name));
     if (name === 'inventory') renderInventory();
@@ -1944,6 +2175,7 @@
     $('#setLightMode').checked = currentTheme() === 'light';
     $('#setScanSound').checked = scanSoundEnabled();
     $('#setScanVolume').value = scanSoundVolume();
+    renderSubStatus();
     // Sales / VAT / service charge for the active shop.
     const t = Config.activeTenant() || {};
     $('#setVatEnabled').checked = !!t.vat_enabled;
@@ -2004,7 +2236,11 @@
       }
     }));
     $('#addProductBtn').addEventListener('click', () => productModal(null));
-    $('#expiringBtn').addEventListener('click', expiringModal);
+    $('#expiringBtn').addEventListener('click', () => {
+      const t = Config.activeTenant();
+      if (!t || t.expiry_tracking_enabled !== 1) { toast('Expiration tracking is off — an administrator enables it per shop.', 'err'); return; }
+      expiringModal();
+    });
     $('#invSearch').addEventListener('input', (e) => { invFilter = e.target.value; renderInventory(); });
     $('#invTable').addEventListener('click', (e) => {
       const ed = e.target.closest('[data-editprod]'); const rs = e.target.closest('[data-restock]');
@@ -2066,13 +2302,32 @@
     });
     $('#adminPinInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#adminUnlockBtn').click(); });
     $('#adminLockBtn').addEventListener('click', () => { sessionStorage.removeItem('admin_ok'); renderAdmin(); });
+
+    // Subscription hard-lock screen: "Administrator access" reveals a PIN
+    // prompt (the same device admin PIN); a correct PIN unlocks straight into
+    // the Admin tab so the subscription can be reviewed/renewed. Everything
+    // else stays refused (see switchView) until the shop is actually renewed.
+    $('#licenseLockAdminBtn').addEventListener('click', () => {
+      $('#licenseLockAdminArea').hidden = true;
+      $('#licenseLockAdminPrompt').hidden = false;
+      $('#licenseLockPin').focus();
+    });
+    $('#licenseLockAdminGo').addEventListener('click', () => {
+      if ($('#licenseLockPin').value === Config.adminPin()) {
+        sessionStorage.setItem('admin_ok', '1');
+        applyLicenseLock();
+        switchView('admin');
+      } else toast('Wrong PIN', 'err');
+    });
+    $('#licenseLockPin').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#licenseLockAdminGo').click(); });
     $('#addTenantBtn').addEventListener('click', () => tenantModal(null));
     $('#tenantSearch').addEventListener('input', (e) => { tenantFilter = e.target.value; renderAdmin(); });
     $('#tenantTable').addEventListener('click', (e) => {
       const ed = e.target.closest('[data-edittenant]'); const use = e.target.closest('[data-usetenant]');
       const tog = e.target.closest('[data-toggletenant]'); const stf = e.target.closest('[data-stafftenant]');
-      const del = e.target.closest('[data-deletetenant]');
+      const del = e.target.closest('[data-deletetenant]'); const sub = e.target.closest('[data-subtenant]');
       if (ed) tenantModal(ed.dataset.edittenant);
+      if (sub) subscriptionModal(sub.dataset.subtenant);
       if (stf) adminStaffModal(stf.dataset.stafftenant);
       if (del) return deleteTenant(del.dataset.deletetenant);
       // "Open" signs in with a device-admin override (full access, no PIN reprompt).
@@ -2285,7 +2540,14 @@
     // Network + sync listeners
     window.addEventListener('online', updateNetPill);
     window.addEventListener('offline', updateNetPill);
-    Sync.onChange((state) => { updateSyncPill(state); if (state.state === 'synced') { renderPOS(); if ($('#view-inventory').classList.contains('active')) renderInventory(); } });
+    Sync.onChange((state) => {
+      updateSyncPill(state);
+      if (state.state === 'synced') {
+        renderPOS(); if ($('#view-inventory').classList.contains('active')) renderInventory();
+        refreshLicenseUI();
+        if (licenseEnforced() && !$('#view-admin').classList.contains('active')) switchView('admin');
+      }
+    });
 
     // Hardware barcode scanners emulate a keyboard: they send characters very
     // fast and finish with Enter. On the Sell screen (no field focused, no
@@ -2384,9 +2646,13 @@
     if (restoreSession()) {
       applyRoleGating();
       updateTopbar();
+      await Config.refreshLicenseState();
+      refreshLicenseUI();
       renderPOS(); renderCart();
+      if (licenseEnforced()) switchView('admin');
     } else {
       Config.setSession(null);
+      await Config.refreshLicenseState();
       showLogin();
     }
   }
