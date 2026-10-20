@@ -17,6 +17,9 @@ window.Sync = (function () {
   let timer = null;
   const listeners = [];
 
+  // `a ?? b` without the operator — Safari 12 (iOS 12 iPads) can't parse `??`.
+  function nz(v, d) { return v === null || v === undefined ? d : v; }
+
   function onChange(fn) { listeners.push(fn); }
   function emit(state) { listeners.forEach((f) => { try { f(state); } catch (e) {} }); }
 
@@ -190,11 +193,11 @@ window.Sync = (function () {
         categories=excluded.categories,receipt_footer=excluded.receipt_footer,logo=excluded.logo,
         status=excluded.status,updated_at=excluded.updated_at`,
       [t.id, t.name, t.slug, t.tin, t.phone, t.email, t.address, t.currency || 'GYD',
-       t.vat_rate ?? 15, t.vat_inclusive ?? 1, t.vat_enabled ?? 1, t.vat_show_receipt ?? 1,
-       t.service_charge_enabled ?? 0, t.service_charge_rate ?? 0, t.service_charge_show_receipt ?? 1,
-       t.logo_on_receipt ?? 1, t.order_no_on_receipt ?? 1, t.analytics_enabled ?? 0, t.remote_sales_enabled ?? 1,
-       t.import_inventory_enabled ?? 0, t.expiry_tracking_enabled ?? 0,
-       t.categories ?? null, t.receipt_footer, t.logo, t.status || 'active',
+       nz(t.vat_rate, 15), nz(t.vat_inclusive, 1), nz(t.vat_enabled, 1), nz(t.vat_show_receipt, 1),
+       nz(t.service_charge_enabled, 0), nz(t.service_charge_rate, 0), nz(t.service_charge_show_receipt, 1),
+       nz(t.logo_on_receipt, 1), nz(t.order_no_on_receipt, 1), nz(t.analytics_enabled, 0), nz(t.remote_sales_enabled, 1),
+       nz(t.import_inventory_enabled, 0), nz(t.expiry_tracking_enabled, 0),
+       nz(t.categories, null), t.receipt_footer, t.logo, t.status || 'active',
        t.updated_at || DB.nowISO(), t.created_at || DB.nowISO()]);
     // A shop deleted on another device: purge its data here too (keep the
     // tombstone row so it stays hidden and is never resurrected as active).
@@ -211,7 +214,7 @@ window.Sync = (function () {
       ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,category=excluded.category,
         image=excluded.image,color=excluded.color,active=excluded.active,sort=excluded.sort,updated_at=excluded.updated_at`,
       [p.id, p.tenant_id, p.name, p.description, p.category || 'General', p.image, p.color,
-       p.active ?? 1, p.sort ?? 0, p.updated_at || DB.nowISO(), p.created_at || DB.nowISO()]);
+       nz(p.active, 1), nz(p.sort, 0), p.updated_at || DB.nowISO(), p.created_at || DB.nowISO()]);
   }
   function upsertVariation(v) {
     if (!newer(v, 'variations')) return;
@@ -222,8 +225,8 @@ window.Sync = (function () {
         supplier_id=excluded.supplier_id,discount_type=excluded.discount_type,discount_value=excluded.discount_value,
         expiry_date=excluded.expiry_date,active=excluded.active,updated_at=excluded.updated_at`,
       [v.id, v.product_id, v.tenant_id, v.name, v.sku, v.barcode, v.price, v.cost, v.stock,
-       v.track_stock ?? 1, v.low_stock_threshold ?? 5, v.supplier_id, v.discount_type || 'none', v.discount_value ?? 0,
-       v.expiry_date ?? null, v.active ?? 1, v.updated_at || DB.nowISO(), v.created_at || DB.nowISO()]);
+       nz(v.track_stock, 1), nz(v.low_stock_threshold, 5), v.supplier_id, v.discount_type || 'none', nz(v.discount_value, 0),
+       nz(v.expiry_date, null), nz(v.active, 1), v.updated_at || DB.nowISO(), v.created_at || DB.nowISO()]);
   }
   function upsertStaff(s) {
     if (!newer(s, 'staff')) return;
@@ -233,8 +236,8 @@ window.Sync = (function () {
         salt=excluded.salt,role=excluded.role,can_view_sales=excluded.can_view_sales,
         can_manage_inventory=excluded.can_manage_inventory,active=excluded.active,updated_at=excluded.updated_at`,
       [s.id, s.tenant_id, s.name, (s.username || '').toLowerCase(), s.pin_hash, s.salt,
-       s.role || 'cashier', s.can_view_sales ?? 0, s.can_manage_inventory ?? 0,
-       s.active ?? 1, s.updated_at || DB.nowISO(), s.created_at || DB.nowISO()]);
+       s.role || 'cashier', nz(s.can_view_sales, 0), nz(s.can_manage_inventory, 0),
+       nz(s.active, 1), s.updated_at || DB.nowISO(), s.created_at || DB.nowISO()]);
   }
   // Sales replicate to every device (overwrite by id; the cloud copy wins, which
   // also propagates voids). Marked synced since they came from the cloud.
@@ -251,7 +254,7 @@ window.Sync = (function () {
         currency=excluded.currency,status=excluded.status,synced=1`,
       [s.id, s.tenant_id, s.receipt_no, s.order_no, s.order_date, s.subtotal, s.vat_amount, s.total,
        s.cash_received, s.change_due, s.item_count, s.cashier, s.vat_inclusive, s.vat_rate,
-       s.service_charge ?? 0, s.service_charge_rate ?? 0, s.origin_device ?? null, s.currency, s.status || 'completed',
+       nz(s.service_charge, 0), nz(s.service_charge_rate, 0), nz(s.origin_device, null), s.currency, s.status || 'completed',
        s.created_at || DB.nowISO()]);
   }
   function upsertSaleItem(it) {
@@ -260,7 +263,7 @@ window.Sync = (function () {
       ON CONFLICT(id) DO UPDATE SET sale_id=excluded.sale_id,name=excluded.name,sku=excluded.sku,
         qty=excluded.qty,unit_price=excluded.unit_price,list_price=excluded.list_price,line_total=excluded.line_total`,
       [it.id, it.sale_id, it.tenant_id, it.product_id, it.variation_id, it.name, it.sku,
-       it.qty, it.unit_price, it.list_price ?? it.unit_price, it.line_total]);
+       it.qty, it.unit_price, nz(it.list_price, it.unit_price), it.line_total]);
   }
   // Subscriptions: server is authoritative (set only via the Admin's
   // Subscription modal + the cloud's license endpoint) — plain last-write-wins.

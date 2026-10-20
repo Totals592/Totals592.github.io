@@ -12,7 +12,7 @@
  *   to reinstall anything and no store review is involved.
  */
 
-const APP_VERSION = 'v2.0.0';
+const APP_VERSION = 'v2.0.1';
 const CACHE = `totals-pos-${APP_VERSION}`;
 
 // The complete app shell. Everything here is available offline after first load.
@@ -39,7 +39,7 @@ self.addEventListener('install', (event) => {
     (async () => {
       const cache = await caches.open(CACHE);
       // addAll fails the whole install if any file 404s, so cache best-effort.
-      await Promise.allSettled(SHELL.map((url) => cache.add(url)));
+      await Promise.all(SHELL.map((url) => cache.add(url).catch(() => {})));
       // Do NOT skipWaiting automatically. We let the page decide when to
       // activate the update so a cashier is never interrupted mid-sale.
     })()
