@@ -4,7 +4,7 @@ An **offline-first, multi-tenant Point-of-Sale Progressive Web App** with a
 Square-style till, full inventory management, legally-compliant VAT receipts,
 and optional cloud sync — all served straight from GitHub Pages.
 
-> **Live app:** https://totals592.github.io
+> **Live app:** https://pos.ts-innovation.com
 > **First run:** a demo shop with products, SKUs and a supplier is created
 > automatically so you can start selling immediately.
 > **Demo logins:** `manager` / `1234` (full access) · `cashier` / `4321`
