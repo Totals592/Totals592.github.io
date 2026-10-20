@@ -11,6 +11,17 @@
   const money = (n) => Config.money(n, (Config.activeTenant() || {}).currency || 'GYD');
   const esc = Config.escapeHtml;
 
+  // Older iPads (Safari < 14.1) ignore flexbox `gap`; flag it so app.css can
+  // fall back to margins.
+  (function detectFlexGap() {
+    const d = document.createElement('div');
+    d.style.cssText = 'display:flex;flex-direction:column;row-gap:1px;position:absolute;visibility:hidden';
+    d.appendChild(document.createElement('div')); d.appendChild(document.createElement('div'));
+    document.body.appendChild(d);
+    if (d.scrollHeight !== 1) document.documentElement.classList.add('no-flexgap');
+    d.remove();
+  })();
+
   /* ---------------- Toasts & modal ---------------- */
   function toast(msg, kind) {
     const t = document.createElement('div');
@@ -1222,7 +1233,7 @@
         </div>
         <label>Receipt footer message</label><input id="tFooter" value="${esc(t.receipt_footer || '')}">
         <label class="switch" style="margin-top:10px"><input type="checkbox" id="tAnalytics" ${t.analytics_enabled === 1 ? 'checked' : ''}> Enable Report Analytics (paid tier)</label>
-        <label class="switch"><input type="checkbox" id="tRemoteSales" ${(t.remote_sales_enabled ?? 1) !== 0 ? 'checked' : ''}> Managers can see real-time sales from all devices</label>
+        <label class="switch"><input type="checkbox" id="tRemoteSales" ${t.remote_sales_enabled !== 0 ? 'checked' : ''}> Managers can see real-time sales from all devices</label>
         <label class="switch"><input type="checkbox" id="tImportInventory" ${t.import_inventory_enabled === 1 ? 'checked' : ''}> Allow creating inventory from imported sales (paid tier)</label>
         <label class="switch"><input type="checkbox" id="tExpiryTracking" ${t.expiry_tracking_enabled === 1 ? 'checked' : ''}> Enable product expiration tracking (paid tier)</label>
         <p class="hint">These usually come from the shop's <b>Subscription</b> (see the Subscription button in the tenant list) — set them there so Plan and these stay in sync; only override an individual one here if you need an exception.</p>

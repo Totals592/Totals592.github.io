@@ -107,8 +107,8 @@ label.switch input { width: auto; }
   color: var(--ink); display: flex; flex-direction: column; justify-content: space-between; overflow: hidden;
 }
 .tile:active { transform: scale(.98); }
-.tile .swatch { position: absolute; inset: 0 0 auto 0; height: 6px; }
-.tile .img { position:absolute; inset:0; background-size:cover; background-position:center; opacity:.22; }
+.tile .swatch { position: absolute; top: 0; right: 0; left: 0; height: 6px; }
+.tile .img { position:absolute; top: 0; right: 0; bottom: 0; left: 0; background-size:cover; background-position:center; opacity:.22; }
 .tile .name { font-weight: 700; line-height: 1.2; margin-top: 6px; position: relative; }
 .tile .price { color: var(--brand); font-weight: 800; position: relative; }
 .tile .low { position: absolute; top: 8px; right: 8px; background: var(--danger); color: #fff;
@@ -172,7 +172,7 @@ table.data th { color: var(--muted); font-weight: 600; position: sticky; top: 0;
 .kpi .k { color: var(--muted); font-size: 13px; }
 
 /* ---------- Modal ---------- */
-.modal-back { position: fixed; inset: 0; background: rgba(3,7,18,.7); display: none; align-items: center;
+.modal-back { position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: rgba(3,7,18,.7); display: none; align-items: center;
   justify-content: center; padding: 16px; z-index: 50; }
 .modal-back.open { display: flex; }
 .modal { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; width: 100%;
@@ -211,7 +211,7 @@ table.data th { color: var(--muted); font-weight: 600; position: sticky; top: 0;
 .update-banner button { background: #3a2600; color: #fff; border: none; padding: 6px 14px; border-radius: 8px; font-weight: 700; }
 
 /* ---------- Login ---------- */
-.login-back { position: fixed; inset: 0; z-index: 80; display: none; align-items: center; justify-content: center;
+.login-back { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 80; display: none; align-items: center; justify-content: center;
   padding: 18px; background: radial-gradient(1200px 600px at 50% -10%, var(--login-a), var(--bg)); }
 .login-back.open { display: flex; }
 .login-card { width: 100%; max-width: 360px; background: var(--panel); border: 1px solid var(--line);
@@ -220,7 +220,7 @@ table.data th { color: var(--muted); font-weight: 600; position: sticky; top: 0;
 .hidden-role { display: none !important; }
 
 /* ---------- Subscription lock + banner ---------- */
-.license-lock-back { position: fixed; inset: 0; z-index: 95; display: none; align-items: center; justify-content: center;
+.license-lock-back { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 95; display: none; align-items: center; justify-content: center;
   padding: 18px; background: radial-gradient(1200px 600px at 50% -10%, var(--login-a), var(--bg)); }
 .license-lock-back.open { display: flex; }
 #licenseLockDetails { text-align: left; }
@@ -233,7 +233,7 @@ table.data th { color: var(--muted); font-weight: 600; position: sticky; top: 0;
 .scanner { position: relative; width: 100%; aspect-ratio: 4 / 3; background: #000; border-radius: 12px;
   overflow: hidden; border: 1px solid var(--line); }
 .scanner video { width: 100%; height: 100%; object-fit: cover; display: block; }
-.scan-reticle { position: absolute; inset: 18% 12%; border: 3px solid rgba(94,234,212,.9);
+.scan-reticle { position: absolute; top: 18%; bottom: 18%; left: 12%; right: 12%; border: 3px solid rgba(94,234,212,.9);
   border-radius: 12px; box-shadow: 0 0 0 100vmax rgba(0,0,0,.25); pointer-events: none; }
 
 /* ---------- Analytics bars ---------- */
@@ -248,3 +248,21 @@ table.data th { color: var(--muted); font-weight: 600; position: sticky; top: 0;
 .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
 .section-title { display:flex; align-items:center; justify-content:space-between; margin: 4px 0 12px; }
 .center { text-align:center; }
+
+/* ---------- Older Safari (iOS 12–14.0) fallbacks ----------
+ * Flexbox `gap` only arrived in Safari 14.1; without it buttons and pills
+ * touch. app.js adds .no-flexgap to <html> when unsupported and these
+ * margins stand in for the missing gaps. Grids are unaffected (grid gap
+ * has worked since Safari 12). */
+.no-flexgap .topbar > * + *, .no-flexgap .brand > * + *, .no-flexgap label.switch > * + *,
+.no-flexgap .tenant-pick > * + *, .no-flexgap .pill > * + *, .no-flexgap .qty > * + *,
+.no-flexgap .cart-actions > * + *, .no-flexgap .modal .foot > * + *, .no-flexgap .footbar > * + *,
+.no-flexgap .soon > * + *, .no-flexgap .tabs > * + *, .no-flexgap .bars > * + * { margin-left: 8px; }
+.no-flexgap .cats > *, .no-flexgap .toolbar > *, .no-flexgap .quick-cash > *,
+.no-flexgap .row-actions > * { margin: 0 8px 8px 0; }
+.no-flexgap .toast-wrap > * + * { margin-top: 8px; }
+.no-flexgap .update-banner > * + * { margin-left: 12px; }
+@supports not (aspect-ratio: 4 / 3) {
+  .scanner { height: 0; padding-top: 75%; }
+  .scanner video { position: absolute; top: 0; left: 0; }
+}
