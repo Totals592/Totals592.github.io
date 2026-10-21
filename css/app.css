@@ -20,6 +20,9 @@
   --warn-bg: rgba(245,158,11,.15); --warn-fg: #fcd34d; --warn-line: #78350f;
   --topbar-a: #16233b; --topbar-b: #101a2e;
   --login-a: #16233b;
+  --on-brand: #04211d;
+  --accent-btn-bg: var(--accent); --accent-btn-fg: #3a2600; --accent-btn-line: var(--accent);
+  --input-bg: var(--panel-2);
 }
 /* Light mode: applied via [data-theme="light"] on <html>, toggled in Settings. */
 [data-theme="light"] {
@@ -31,7 +34,7 @@
   --muted: #5b6577;
   --brand: #0f766e;
   --brand-d: #0d5f59;
-  --accent: #b45309;
+  --accent: #d97706;
   --danger: #dc2626;
   --ok: #16a34a;
   --shadow: 0 8px 24px rgba(15,23,42,.12);
@@ -39,7 +42,12 @@
   --ok-bg: #dcfce7; --ok-fg: #15803d; --ok-line: #bbf7d0;
   --warn-bg: #fef3c7; --warn-fg: #92400e; --warn-line: #fde68a;
   --topbar-a: #ffffff; --topbar-b: #eef1f6;
-  --login-a: #dbe4f3;
+  --login-a: #e3f4f1;
+  /* White text on teal reads cleanly on a white page; the amber accent
+     becomes a soft tint instead of a heavy orange block. */
+  --on-brand: #ffffff;
+  --accent-btn-bg: #fef3c7; --accent-btn-fg: #92400e; --accent-btn-line: #fcd34d;
+  --input-bg: #ffffff;
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
@@ -51,9 +59,10 @@ body {
 button { font-family: inherit; cursor: pointer; }
 input, select, textarea {
   font-family: inherit; font-size: 15px; color: var(--ink);
-  background: var(--panel-2); border: 1px solid var(--line);
+  background: var(--input-bg); border: 1px solid var(--line);
   border-radius: 10px; padding: 10px 12px; width: 100%;
 }
+input[type="checkbox"], input[type="radio"], input[type="range"] { accent-color: var(--brand); }
 input:focus, select:focus, textarea:focus { outline: 2px solid var(--brand); border-color: var(--brand); }
 label { font-size: 12px; color: var(--muted); display: block; margin: 10px 0 4px; }
 a { color: var(--brand); }
@@ -98,7 +107,7 @@ label.switch input { width: auto; }
   border: 1px solid var(--line); background: var(--panel); color: var(--muted);
   padding: 7px 14px; border-radius: 999px; font-weight: 600;
 }
-.chip.active { background: var(--brand); color: #04211d; border-color: var(--brand); }
+.chip.active { background: var(--brand); color: var(--on-brand); border-color: var(--brand); }
 
 .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 12px; }
 .tile {
@@ -136,7 +145,7 @@ label.switch input { width: auto; }
 .summary .row.total { color: var(--ink); font-size: 20px; font-weight: 800; margin-top: 8px; }
 .charge {
   width: 100%; border: none; border-radius: 12px; padding: 16px; font-size: 18px; font-weight: 800;
-  background: var(--brand); color: #04211d; margin-top: 10px;
+  background: var(--brand); color: var(--on-brand); margin-top: 10px;
 }
 .charge:disabled { opacity: .4; }
 .cart-actions { display: flex; gap: 8px; padding: 0 14px 12px; }
@@ -145,8 +154,8 @@ label.switch input { width: auto; }
   padding: 10px 14px; border-radius: 10px; font-weight: 600;
 }
 .btn.small { padding: 7px 10px; font-size: 13px; }
-.btn.brand { background: var(--brand); color: #04211d; border-color: var(--brand); }
-.btn.accent { background: var(--accent); color: #3a2600; border-color: var(--accent); }
+.btn.brand { background: var(--brand); color: var(--on-brand); border-color: var(--brand); }
+.btn.accent { background: var(--accent-btn-bg); color: var(--accent-btn-fg); border-color: var(--accent-btn-line); }
 .btn.danger { background: transparent; color: var(--danger); border-color: var(--danger); }
 .btn.ghost { background: transparent; }
 .btn:disabled { opacity: .5; }
@@ -216,7 +225,7 @@ table.data th { color: var(--muted); font-weight: 600; position: sticky; top: 0;
 .login-back.open { display: flex; }
 .login-card { width: 100%; max-width: 360px; background: var(--panel); border: 1px solid var(--line);
   border-radius: 18px; padding: 22px; box-shadow: var(--shadow); }
-.login-err { color: #fca5a5; font-size: 13px; min-height: 18px; margin-top: 8px; text-align: center; }
+.login-err { color: var(--danger-fg); font-size: 13px; min-height: 18px; margin-top: 8px; text-align: center; }
 .hidden-role { display: none !important; }
 
 /* ---------- Subscription lock + banner ---------- */
