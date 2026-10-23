@@ -223,6 +223,39 @@ alter table tenants    add column if not exists expiry_tracking_enabled int defa
 -- (the bump_seq trigger loop now also covers 'subscriptions' and 'devices').
 ```
 
+### 2c. Per-shop security, sign-ups and login lockout
+
+Each shop's devices may only download and change that shop's data; the
+owner's devices hold an **admin key** and see everything. These tables back
+the sign-up requests and the wrong-PIN lockout, and Row-Level Security (with
+no policies) blocks every direct database client — only the Edge Function
+(which uses the service-role key) can read or write. Safe to re-run.
+
+```sql
+create table if not exists signup_requests (
+  id text primary key, status text default 'pending',
+  owner_name text, shop_name text, phone text, phone2 text, email text, address text,
+  currency text, username text, pin_hash text, salt text,
+  tenant_id text, note text, created_at timestamptz default now(), decided_at timestamptz
+);
+
+create table if not exists login_failures (
+  key text primary key, count int default 0, locked_until timestamptz, updated_at timestamptz
+);
+
+do $$
+declare t text;
+begin
+  foreach t in array array['tenants','suppliers','products','variations','staff','sales','sale_items',
+                           'subscriptions','subscription_audit_log','devices','signup_requests','login_failures']
+  loop
+    if to_regclass('public.' || t) is not null then
+      execute format('alter table public.%I enable row level security', t);
+    end if;
+  end loop;
+end $$;
+```
+
 ## 3. The sync API — Supabase Edge Function
 
 You need one small server that implements `/api/sync` and `/api/pull` against
@@ -242,16 +275,17 @@ const db = createClient(
 );
 const cors = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "content-type, authorization",
+  "Access-Control-Allow-Headers": "content-type, authorization, x-admin-key, x-device-token",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
 };
 const json = (b: unknown, s = 200) =>
   new Response(JSON.stringify(b), { status: s, headers: { ...cors, "content-type": "application/json" } });
+const nowISO = () => new Date().toISOString();
+const enc = new TextEncoder();
 
 /* ---------------- Subscription license signing (ECDSA P-256 / ES256) ----
  * The PRIVATE key lives only here (a Supabase secret); js/config.js in the
- * app embeds the matching PUBLIC key to verify tokens fully offline. See
- * "Subscription licensing" below for how to generate/set the keypair. */
+ * app embeds the matching PUBLIC key to verify tokens fully offline. */
 const GRACE_DAYS = 5;
 let _licenseKeyPromise: Promise<CryptoKey> | null = null;
 function b64urlToBytes(s: string): Uint8Array {
@@ -262,13 +296,15 @@ function b64urlToBytes(s: string): Uint8Array {
 function bytesToB64url(bytes: ArrayBuffer | Uint8Array): string {
   return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
+function licenseKeyB64(): string {
+  const b64 = Deno.env.get("LICENSE_PRIVATE_KEY_PKCS8_B64");
+  if (!b64) throw new Error("LICENSE_PRIVATE_KEY_PKCS8_B64 is not set");
+  return b64;
+}
 function getLicensePrivateKey(): Promise<CryptoKey> {
   if (!_licenseKeyPromise) {
-    // NOTE: this is STANDARD base64 (as produced when the keypair was
-    // generated), not base64url — do not run it through b64urlToBytes.
-    const b64 = Deno.env.get("LICENSE_PRIVATE_KEY_PKCS8_B64");
-    if (!b64) throw new Error("LICENSE_PRIVATE_KEY_PKCS8_B64 is not set");
-    const raw = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    // STANDARD base64 (not base64url) — do not run through b64urlToBytes.
+    const raw = Uint8Array.from(atob(licenseKeyB64()), (c) => c.charCodeAt(0));
     _licenseKeyPromise = crypto.subtle.importKey(
       "pkcs8", raw, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]
     );
@@ -277,50 +313,323 @@ function getLicensePrivateKey(): Promise<CryptoKey> {
 }
 async function signLicenseToken(payload: Record<string, unknown>): Promise<string> {
   const key = await getLicensePrivateKey();
-  const h = bytesToB64url(new TextEncoder().encode(JSON.stringify({ alg: "ES256", typ: "LICENSE" })));
-  const p = bytesToB64url(new TextEncoder().encode(JSON.stringify(payload)));
-  const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, new TextEncoder().encode(h + "." + p));
+  const h = bytesToB64url(enc.encode(JSON.stringify({ alg: "ES256", typ: "LICENSE" })));
+  const p = bytesToB64url(enc.encode(JSON.stringify(payload)));
+  const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, enc.encode(h + "." + p));
   return h + "." + p + "." + bytesToB64url(sig);
 }
+const FULL_ACCESS = { analytics: true, remote_sales: true, import_inventory: true, expiry_tracking: true };
 // Look up (creating a default 3-day full-access trial if none exists yet, so
 // a brand-new shop is immediately usable) and sign a license for a tenant.
 async function issueLicense(tenantId: string): Promise<string> {
   let { data: sub } = await db.from("subscriptions").select("*").eq("tenant_id", tenantId).maybeSingle();
-  if (!sub) {
-    const now = new Date();
-    const expires = new Date(now.getTime() + 3 * 86400000);
-    const grace = new Date(expires.getTime() + GRACE_DAYS * 86400000);
-    sub = {
-      tenant_id: tenantId, plan: "trial", status: "active",
-      started_at: now.toISOString(), expires_at: expires.toISOString(), grace_until: grace.toISOString(),
-      entitlements: { analytics: true, remote_sales: true, import_inventory: true, expiry_tracking: true }
-    };
-    await db.from("subscriptions").upsert(sub);
-    await db.from("subscription_audit_log").insert({
-      id: crypto.randomUUID(), tenant_id: tenantId, action: "created", to_plan: "trial",
-      to_expires: sub.expires_at, note: "auto-issued 3-day trial", at: now.toISOString()
-    });
-  }
+  if (!sub) sub = await createTrial(tenantId, "auto-issued 3-day trial");
   return signLicenseToken({
     tenant_id: tenantId, plan: sub.plan, canceled: sub.status === "canceled",
     expires_at: sub.expires_at, grace_until: sub.grace_until,
-    entitlements: sub.entitlements || {}, issued_at: new Date().toISOString()
+    entitlements: sub.entitlements || {}, issued_at: nowISO()
   });
 }
+async function createTrial(tenantId: string, note: string) {
+  const now = new Date();
+  const expires = new Date(now.getTime() + 3 * 86400000);
+  const grace = new Date(expires.getTime() + GRACE_DAYS * 86400000);
+  const sub = {
+    tenant_id: tenantId, plan: "trial", status: "active",
+    started_at: now.toISOString(), expires_at: expires.toISOString(), grace_until: grace.toISOString(),
+    entitlements: FULL_ACCESS, created_at: now.toISOString(), updated_at: now.toISOString()
+  };
+  await db.from("subscriptions").upsert(sub);
+  await db.from("subscription_audit_log").insert({
+    id: crypto.randomUUID(), tenant_id: tenantId, action: "created", to_plan: "trial",
+    to_expires: sub.expires_at, note, at: now.toISOString()
+  });
+  return sub;
+}
+
+/* ---------------- Device auth & per-shop scoping ------------------------
+ * X-Admin-Key: <ADMIN_KEY secret>  -> the owner's device: every shop.
+ * X-Device-Token: <token>          -> ONE shop, issued by /login after a
+ *                                     staff shop-name + username + PIN check.
+ * Tokens are HMAC-signed with a key derived from the license private key, so
+ * no extra secret is needed for them. */
+let _hmacKey: Promise<CryptoKey> | null = null;
+function hmacKey(): Promise<CryptoKey> {
+  if (!_hmacKey) {
+    _hmacKey = crypto.subtle.digest("SHA-256", enc.encode("device-token-v1:" + licenseKeyB64()))
+      .then((raw) => crypto.subtle.importKey("raw", raw, { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]));
+  }
+  return _hmacKey;
+}
+async function signDeviceToken(payload: Record<string, unknown>): Promise<string> {
+  const p = bytesToB64url(enc.encode(JSON.stringify(payload)));
+  const mac = await crypto.subtle.sign("HMAC", await hmacKey(), enc.encode(p));
+  return p + "." + bytesToB64url(mac);
+}
+async function verifyDeviceToken(tok: string): Promise<{ tid: string; sid: string } | null> {
+  const parts = String(tok || "").split(".");
+  if (parts.length !== 2) return null;
+  try {
+    const ok = await crypto.subtle.verify("HMAC", await hmacKey(), b64urlToBytes(parts[1]), enc.encode(parts[0]));
+    if (!ok) return null;
+    return JSON.parse(new TextDecoder().decode(b64urlToBytes(parts[0])));
+  } catch (_) { return null; }
+}
+function safeEqual(a: string, b: string): boolean {
+  if (!a || !b || a.length !== b.length) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return d === 0;
+}
+type Auth = { scope: "admin" } | { scope: "tenant"; tid: string; sid: string } | { error: string };
+async function authenticate(req: Request): Promise<Auth> {
+  const key = req.headers.get("x-admin-key");
+  if (key) return safeEqual(key, Deno.env.get("ADMIN_KEY") || "") ? { scope: "admin" } : { error: "bad_admin_key" };
+  const tok = req.headers.get("x-device-token");
+  if (!tok) return { error: "no_credentials" };
+  const t = await verifyDeviceToken(tok);
+  if (!t || !t.tid || !t.sid) return { error: "invalid_token" };
+  const { data: staff } = await db.from("staff").select("tenant_id, active").eq("id", t.sid).maybeSingle();
+  const { data: tenant } = await db.from("tenants").select("status").eq("id", t.tid).maybeSingle();
+  // Revoked when the staff member is removed/deactivated or the shop deleted.
+  if (!staff || staff.tenant_id !== t.tid || !Number(staff.active ?? 1) || !tenant || tenant.status === "deleted") {
+    return { error: "revoked" };
+  }
+  return { scope: "tenant", tid: t.tid, sid: t.sid };
+}
+const norm = (s: unknown) => String(s ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+async function shopNameTaken(name: string, exceptTenantId?: string | null): Promise<boolean> {
+  const { data } = await db.from("tenants").select("id, name").neq("status", "deleted");
+  return (data || []).some((t: { id: string; name: string }) => t.id !== exceptTenantId && norm(t.name) === norm(name));
+}
+// The tenant id that owns a row (null when the row doesn't exist yet).
+async function ownerOf(table: string, id: string): Promise<string | null> {
+  if (!id) return null;
+  const { data } = await db.from(table).select("tenant_id").eq("id", id).maybeSingle();
+  return data ? data.tenant_id : null;
+}
+// Shop settings a manager may change from their own device; plan/feature
+// switches, currency and status stay with the admin.
+const ADMIN_ONLY_TENANT_FIELDS = ["status", "currency", "analytics_enabled", "remote_sales_enabled",
+  "import_inventory_enabled", "expiry_tracking_enabled"];
+// Decide whether a shop-scoped device may apply this change (pinning its
+// payload to that shop). Admin devices may apply anything.
+// deno-lint-ignore no-explicit-any
+async function authorizeChange(ch: any, auth: Auth): Promise<boolean> {
+  if ("error" in auth) return false;
+  if (auth.scope === "admin") return true;
+  const tid = auth.tid;
+  const p = ch.payload || (ch.payload = {});
+  const mine = async (table: string, id: string) => { const o = await ownerOf(table, id); return o === null || o === tid; };
+  switch (ch.entity) {
+    case "tenant": {
+      if (ch.entity_id !== tid) return false;
+      ADMIN_ONLY_TENANT_FIELDS.forEach((f) => delete p[f]);
+      if (p.name != null && await shopNameTaken(p.name, tid)) delete p.name;
+      return true;
+    }
+    case "product": {
+      if (ch.op === "delete") return (await ownerOf("products", ch.entity_id)) === tid;
+      if (p.product) { if (!(await mine("products", p.product.id))) return false; p.product.tenant_id = tid; }
+      for (const v of p.variations || []) {
+        if (!(await mine("variations", v.id)) || !(await mine("products", v.product_id))) return false;
+        v.tenant_id = tid;
+      }
+      return true;
+    }
+    case "staff":
+      if (!(await mine("staff", ch.entity_id))) return false;
+      p.tenant_id = tid; return true;
+    case "stock":
+      return (await ownerOf("variations", ch.entity_id)) === tid;
+    case "sale": {
+      if (!(await mine("sales", ch.entity_id))) return false;
+      if (p.sale) p.sale.tenant_id = tid;
+      for (const it of p.items || []) {
+        if (it.id && !(await mine("sale_items", it.id))) return false;
+        it.tenant_id = tid;
+      }
+      return true;
+    }
+    default: return false; // subscriptions etc. are admin-only
+  }
+}
+
+/* ---------------- Sign-in & sign-up ------------------------------------- */
+const LOCK_AFTER = 8, LOCK_MS = 15 * 60 * 1000;
+async function hashPin(pin: string, salt: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", enc.encode(String(salt) + ":" + String(pin)));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function recordDevice(deviceId: string | null, tid: string, name: string | null) {
+  if (!deviceId) return;
+  const now = nowISO();
+  const { data: existing } = await db.from("devices").select("device_id").eq("device_id", deviceId).maybeSingle();
+  // first_seen only on the very first check-in (omitting the key leaves it).
+  await db.from("devices").upsert({
+    device_id: deviceId, tenant_id: tid, device_name: name,
+    ...(existing ? {} : { first_seen: now }), last_seen: now
+  });
+}
+// deno-lint-ignore no-explicit-any
+async function notifySignup(r: any) {
+  const key = Deno.env.get("RESEND_API_KEY"), to = Deno.env.get("NOTIFY_EMAIL");
+  if (!key || !to) return;
+  const text = [
+    "A new shop asked to join TS - POS:", "",
+    "Shop: " + r.shop_name, "Owner: " + r.owner_name, "Phone: " + r.phone,
+    "Second phone: " + (r.phone2 || "-"), "Email: " + (r.email || "-"),
+    "Location: " + (r.address || "-"), "Currency: " + r.currency, "Username: " + r.username, "",
+    "Approve it in the app: Admin -> Sign-up requests."
+  ].join("\n");
+  try {
+    await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: Deno.env.get("NOTIFY_FROM") || "TS - POS <onboarding@resend.dev>",
+        to: [to], subject: "New TS - POS sign-up: " + r.shop_name, text
+      })
+    });
+  } catch (e) { console.error("signup e-mail failed", e); }
+}
+const CURRENCIES = ["GYD", "USD", "EUR", "GBP", "GHS", "NGN", "KES", "ZAR"];
+// deno-lint-ignore no-explicit-any
+function validateSignup(b: any): string | null {
+  const str = (v: unknown, max: number) => typeof v === "string" && v.trim().length > 0 && v.length <= max;
+  if (!str(b.owner_name, 80)) return "Enter your name.";
+  if (!str(b.shop_name, 80) || b.shop_name.trim().length < 2) return "Enter your shop name.";
+  if (!/^[0-9+()\-\s]{7,20}$/.test(String(b.phone || ""))) return "Enter a valid phone number.";
+  if (b.phone2 && !/^[0-9+()\-\s]{7,20}$/.test(String(b.phone2))) return "Enter a valid second phone number.";
+  if (b.email && !/^[^\s@]{1,64}@[^\s@]{1,100}\.[^\s@]{2,}$/.test(String(b.email))) return "Enter a valid email address.";
+  if (!str(b.address, 200)) return "Enter your shop location.";
+  if (!CURRENCIES.includes(b.currency)) return "Choose a currency.";
+  if (!/^[a-z0-9._-]{2,30}$/.test(String(b.username || ""))) return "Username: 2-30 letters or numbers.";
+  if (!/^[0-9a-f]{64}$/.test(String(b.pin_hash || "")) || !/^[0-9a-f]{8,64}$/.test(String(b.salt || ""))) return "Invalid PIN.";
+  return null;
+}
+const slugify = (s: string) => norm(s).replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   const url = new URL(req.url);
+  const path = url.pathname.replace(/^.*\/api/, "");   // "/sync", "/pull", ...
 
-  // PUSH: registers upload their outbox.
-  if (url.pathname.endsWith("/sync") && req.method === "POST") {
+  // ---- Staff sign-in -> shop-scoped device token (public) ----
+  if (path === "/login" && req.method === "POST") {
+    const b = await req.json().catch(() => ({}));
+    const shop = norm(b.shop), user = norm(b.username);
+    if (!shop || !user || !b.pin) return json({ error: "missing_fields" }, 400);
+    const key = shop + "|" + user;
+    const { data: f } = await db.from("login_failures").select("*").eq("key", key).maybeSingle();
+    if (f && f.locked_until && new Date(f.locked_until) > new Date()) {
+      return json({ error: "locked", retry_after: f.locked_until }, 429);
+    }
+    const { data: tenants } = await db.from("tenants").select("id, name, status").neq("status", "deleted");
+    const tenant = (tenants || []).find((t: { name: string }) => norm(t.name) === shop);
+    let staff = null;
+    if (tenant) {
+      const { data: rows } = await db.from("staff").select("*").eq("tenant_id", tenant.id);
+      staff = (rows || []).find((s: { username: string; active: number }) => norm(s.username) === user && Number(s.active ?? 1)) || null;
+    }
+    if (!tenant || !staff || (await hashPin(b.pin, staff.salt)) !== staff.pin_hash) {
+      let count = (f ? f.count : 0) + 1, locked_until = null;
+      if (count >= LOCK_AFTER) { locked_until = new Date(Date.now() + LOCK_MS).toISOString(); count = 0; }
+      await db.from("login_failures").upsert({ key, count, locked_until, updated_at: nowISO() });
+      return json({ error: "invalid_login" }, 401);
+    }
+    if (tenant.status === "suspended") return json({ error: "suspended" }, 403);
+    if (f) await db.from("login_failures").delete().eq("key", key);
+    await recordDevice(b.device_id || null, tenant.id, b.device_name || null);
+    const token = await signDeviceToken({ tid: tenant.id, sid: staff.id, iat: nowISO() });
+    return json({ token, tenant_id: tenant.id, tenant_name: tenant.name });
+  }
+
+  // ---- Public sign-up request (owner approves it in Admin) ----
+  if (path === "/signup" && req.method === "POST") {
+    const b = await req.json().catch(() => ({}));
+    if (b.website) return json({ ok: true });   // honeypot: bots fill hidden fields
+    const bad = validateSignup(b);
+    if (bad) return json({ error: "invalid", message: bad }, 400);
+    const { data: pending } = await db.from("signup_requests").select("shop_name, phone").eq("status", "pending");
+    const list = pending || [];
+    if (list.length >= 500) return json({ error: "busy", message: "Too many pending requests — please call us." }, 429);
+    if (list.filter((r: { phone: string }) => r.phone === b.phone.trim()).length >= 3) {
+      return json({ error: "busy", message: "You already have requests waiting — we will contact you soon." }, 429);
+    }
+    if (await shopNameTaken(b.shop_name) || list.some((r: { shop_name: string }) => norm(r.shop_name) === norm(b.shop_name))) {
+      return json({ error: "shop_taken", message: "That shop name is already registered. Please choose another." }, 409);
+    }
+    // deno-lint-ignore no-explicit-any
+    const r: any = { id: "sup_" + crypto.randomUUID(), status: "pending", created_at: nowISO() };
+    ["owner_name", "shop_name", "phone", "phone2", "email", "address", "currency", "username", "pin_hash", "salt"]
+      .forEach((k) => { r[k] = typeof b[k] === "string" && b[k].trim() ? b[k].trim() : null; });
+    r.username = r.username.toLowerCase();
+    const { error } = await db.from("signup_requests").insert(r);
+    if (error) return json({ error: "failed", message: "Could not save your request — please try again." }, 500);
+    await notifySignup(r);
+    return json({ ok: true });
+  }
+
+  // Everything below needs a device token or the admin key.
+  const auth = await authenticate(req);
+  if ("error" in auth) return json({ error: auth.error }, 401);
+  const tid = auth.scope === "tenant" ? auth.tid : null;
+
+  if (path === "/whoami" && req.method === "GET") return json({ scope: auth.scope, tenant_id: tid });
+
+  if (path === "/shop-name-available" && req.method === "GET") {
+    const name = url.searchParams.get("name") || "";
+    return json({ available: !!name.trim() && !(await shopNameTaken(name, tid || url.searchParams.get("tenant_id"))) });
+  }
+
+  // ---- Sign-up review (admin only) ----
+  if (path.startsWith("/signups")) {
+    if (auth.scope !== "admin") return json({ error: "admin_only" }, 403);
+    if (path === "/signups" && req.method === "GET") {
+      const { data } = await db.from("signup_requests")
+        .select("id, status, owner_name, shop_name, phone, phone2, email, address, currency, username, tenant_id, created_at, decided_at, note")
+        .order("created_at", { ascending: false }).limit(100);
+      return json({ requests: data || [] });
+    }
+    const b = await req.json().catch(() => ({}));
+    const { data: r } = await db.from("signup_requests").select("*").eq("id", b.id).maybeSingle();
+    if (!r || r.status !== "pending") return json({ error: "not_found" }, 404);
+    if (path === "/signups/approve" && req.method === "POST") {
+      if (await shopNameTaken(r.shop_name)) return json({ error: "shop_taken", message: "A shop with this name already exists." }, 409);
+      const now = nowISO();
+      const newTid = "ten_" + crypto.randomUUID();
+      await db.from("tenants").insert({
+        id: newTid, name: r.shop_name, slug: slugify(r.shop_name), phone: r.phone, email: r.email,
+        address: r.address, currency: r.currency, status: "active", created_at: now, updated_at: now
+      });
+      await db.from("staff").insert({
+        id: "stf_" + crypto.randomUUID(), tenant_id: newTid, name: r.owner_name, username: r.username,
+        pin_hash: r.pin_hash, salt: r.salt, role: "manager", active: 1, created_at: now, updated_at: now
+      });
+      await createTrial(newTid, "Sign-up approved — 3-day trial");
+      await db.from("signup_requests").update({ status: "approved", tenant_id: newTid, decided_at: now }).eq("id", r.id);
+      return json({ ok: true, tenant_id: newTid });
+    }
+    if (path === "/signups/reject" && req.method === "POST") {
+      await db.from("signup_requests").update({ status: "rejected", decided_at: nowISO(), note: b.note || null }).eq("id", r.id);
+      return json({ ok: true });
+    }
+    return json({ error: "not found" }, 404);
+  }
+
+  // PUSH: registers upload their outbox; each change is checked against the
+  // device's shop first.
+  if (path === "/sync" && req.method === "POST") {
     const { changes = [] } = await req.json();
-    const applied: string[] = [];
+    const applied: string[] = [], rejected: string[] = [];
     for (const ch of changes) {
       try {
+        if (!(await authorizeChange(ch, auth))) { rejected.push(ch.id); continue; }
         const p = ch.payload || {};
         if (ch.entity === "tenant")  await db.from("tenants").upsert({ id: ch.entity_id, ...p });
         else if (ch.entity === "product") {
+          if (ch.op === "delete") await db.from("products").update({ active: 0, updated_at: nowISO() }).eq("id", ch.entity_id);
           if (p.product) await db.from("products").upsert(p.product);
           if (p.variations) for (const v of p.variations) await db.from("variations").upsert(v);
         }
@@ -329,7 +638,7 @@ serve(async (req) => {
           const { data } = await db.from("variations").select("stock").eq("id", ch.entity_id).single();
           const cur = Number(data?.stock ?? 0);
           const next = ch.op === "set" ? Number(p.stock || 0) : cur - Number(p.qty || 0);
-          await db.from("variations").update({ stock: next, updated_at: new Date().toISOString() }).eq("id", ch.entity_id);
+          await db.from("variations").update({ stock: next, updated_at: nowISO() }).eq("id", ch.entity_id);
         }
         else if (ch.entity === "sale") {
           if (p.sale) await db.from("sales").upsert(p.sale);
@@ -342,21 +651,25 @@ serve(async (req) => {
         applied.push(ch.id);
       } catch (_) { /* leave un-applied; the register retries */ }
     }
-    return json({ applied });
+    return json({ applied, rejected });
   }
 
-  // PULL: registers download rows changed since their per-table cursor.
-  if (url.pathname.endsWith("/pull") && req.method === "GET") {
+  // PULL: rows changed since each per-table cursor — only the device's own
+  // shop unless it holds the admin key.
+  if (path === "/pull" && req.method === "GET") {
     const qp = url.searchParams;
     const legacy = Number(qp.get("since") || 0);
     const cur = (name: string) => Number(qp.get(name + "_since") ?? legacy) || 0;
-    const pick = async (t: string) =>
-      (await db.from(t).select("*").gt("seq", cur(t)).order("seq")).data || [];
-    const tenants = await pick("tenants");
+    const pick = async (t: string, col = "tenant_id") => {
+      let q = db.from(t).select("*").gt("seq", cur(t));
+      if (tid) q = q.eq(col, tid);
+      return (await q.order("seq")).data || [];
+    };
+    const tenants = await pick("tenants", "id");
     const products = await pick("products");
     const variations = await pick("variations");
     const staff = await pick("staff");
-    const sales = await pick("sales");           // sales now replicate to every device
+    const sales = await pick("sales");
     const sale_items = await pick("sale_items");
     const subscriptions = await pick("subscriptions");
     const subscription_audit_log = await pick("subscription_audit_log");
@@ -366,27 +679,13 @@ serve(async (req) => {
 
   // LICENSE: sign a fresh token for a tenant's current subscription state,
   // and record the requesting device (visibility only, no cap enforced).
-  // See "Subscription licensing" below for how LICENSE_PRIVATE_KEY_B64 is set.
-  if (url.pathname.endsWith("/license") && req.method === "GET") {
-    const tid = url.searchParams.get("tenant_id");
-    if (!tid) return json({ error: "tenant_id required" }, 400);
-    const deviceId = url.searchParams.get("device_id");
-    if (deviceId) {
-      const now = new Date().toISOString();
-      const { data: existing } = await db.from("devices").select("device_id").eq("device_id", deviceId).maybeSingle();
-      // first_seen is set only on the very first check-in: omitting a key
-      // (undefined is dropped by JSON.stringify) keeps PostgREST's upsert from
-      // touching that column on an existing row, so it's never reset.
-      await db.from("devices").upsert({
-        device_id: deviceId, tenant_id: tid,
-        device_name: url.searchParams.get("device_name"),
-        ...(existing ? {} : { first_seen: now }),
-        last_seen: now
-      });
-    }
+  if (path === "/license" && req.method === "GET") {
+    const t = url.searchParams.get("tenant_id");
+    if (!t) return json({ error: "tenant_id required" }, 400);
+    if (tid && t !== tid) return json({ error: "wrong_shop" }, 403);
+    await recordDevice(url.searchParams.get("device_id"), t, url.searchParams.get("device_name"));
     try {
-      const token = await issueLicense(tid);
-      return json({ token });
+      return json({ token: await issueLicense(t) });
     } catch (e) {
       return json({ error: String((e as Error).message || e) }, 500);
     }
@@ -443,6 +742,21 @@ seconds (once online). If it instead stays on "No subscription information
 cached yet", check the Edge Function logs (Supabase Dashboard → Edge
 Functions → api → Logs) for a `LICENSE_PRIVATE_KEY_PKCS8_B64 is not set` error.
 
+### 3b. Admin key and sign-up e-mails
+
+Add these under **Edge Functions → Secrets**:
+
+| Secret | Value |
+|---|---|
+| `ADMIN_KEY` | A long password only you know (20+ characters). Save it once in the app on **your** devices: Admin → Cloud sync → Admin key. Those devices sync every shop and can approve sign-ups. |
+| `RESEND_API_KEY` | *(optional)* An API key from [resend.com](https://resend.com) — e-mails you each new sign-up. |
+| `NOTIFY_EMAIL` | *(optional)* The address to notify — use the e-mail you signed up to Resend with. |
+| `NOTIFY_FROM` | *(optional)* Sender, once you've verified your domain in Resend, e.g. `TS - POS <signups@ts-innovate.com>`. Without it, Resend's test sender is used, which can only deliver to your own Resend account address. |
+
+Shop devices get their per-shop pass automatically when a staff member signs
+in online. A device that was signed in before this change shows **"Tap to
+connect cloud"** at the top — tap it and enter the PIN once.
+
 ## 4. Point the app at the sync API
 
 The app already ships with this URL baked in (Admin → Cloud sync shows it), so on
@@ -480,58 +794,22 @@ That is enough for a 2-tenant user test.
 
 ---
 
-## B. Hardening for real accounts (before paying customers)
+## B. How shops are kept apart
 
-For genuinely separate customer accounts you must add authentication and
-Row-Level Security so one tenant can never read another's rows.
+- A shop device only holds a **device token** for its own shop, issued by
+  `/api/login` after a staff member's shop name + username + PIN check (8 wrong
+  PINs lock that login for 15 minutes). `/api/pull` filters every table to that
+  shop, and `/api/sync` refuses any change that touches another shop, plan
+  or subscription data, currency, or feature switches.
+- The owner's devices send the `ADMIN_KEY` instead and see every shop.
+- Row-Level Security is on with no policies, so the Supabase REST API (anon
+  key) can't read anything; only the Edge Function's service role can.
 
-```sql
--- Who may touch which tenant.
-create table memberships (
-  user_id uuid references auth.users(id),
-  tenant_id text references tenants(id),
-  role text default 'manager',
-  primary key (user_id, tenant_id)
-);
+Still worth doing as you grow:
 
--- Turn on RLS everywhere.
-alter table tenants     enable row level security;
-alter table products    enable row level security;
-alter table variations  enable row level security;
-alter table suppliers   enable row level security;
-alter table sales       enable row level security;
-alter table sale_items  enable row level security;
-alter table staff       enable row level security;
-
--- A helper: tenants the current user belongs to.
-create or replace function my_tenant_ids() returns setof text
-language sql security definer stable as $$
-  select tenant_id from memberships where user_id = auth.uid()
-$$;
-
--- Example policy (repeat per table): only rows for the user's tenants.
-create policy tenant_isolation on products
-  using (tenant_id in (select my_tenant_ids()))
-  with check (tenant_id in (select my_tenant_ids()));
--- ...same for variations, suppliers, sales, sale_items, staff, and
---    (on tenants) id in (select my_tenant_ids()).
-```
-
-Then:
-
-- Enable **Supabase Auth** (email/password or magic link). Each shop owner signs
-  up; you insert a `memberships` row linking them to their `tenant_id`.
-- Redeploy the Edge Function **without** `--no-verify-jwt` and have the client
-  send the user's Supabase access token; drop the service-role key from the pull
-  path so RLS is enforced. (The in-shop staff PIN stays as the till-level login on
-  top of the account.)
 - Make stock decrements a Postgres RPC (a single `update ... set stock = stock -
   qty`) so concurrent registers can't oversell.
 - Move product/logo images to **Supabase Storage** instead of base64.
-
-At that point you have a multi-tenant SaaS: many customers, one database, each
-isolated by RLS, scalable on Supabase's Postgres and served from GitHub Pages'
-CDN.
 
 ---
 

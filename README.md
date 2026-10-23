@@ -142,11 +142,12 @@ set the **Cloud API base URL** in the app's Settings.
 ## Scaling to many customers (GitHub Pages + Supabase)
 
 The front end is hosted on **GitHub Pages** and the cloud database is
-**Supabase** (a Supabase Edge Function implements the app's sync contract). To
-add real accounts and per-tenant isolation for a multi-customer SaaS, follow
-[`docs/MIGRATION-SUPABASE.md`](docs/MIGRATION-SUPABASE.md). It includes the
-Postgres schema, the Edge Function, Row-Level Security policies, and a
-step-by-step 2-tenant test setup.
+**Supabase** (a Supabase Edge Function implements the app's sync contract).
+Each shop's devices only ever receive that shop's data: a staff sign-in issues a
+per-shop device token, while the owner's devices use an admin key to see every
+shop and approve **Sign up** requests (new shops get a 3-day trial). Setup —
+schema, Edge Function, secrets and Row-Level Security — is in
+[`docs/MIGRATION-SUPABASE.md`](docs/MIGRATION-SUPABASE.md).
 
 ## Roadmap
 

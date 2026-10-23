@@ -428,7 +428,7 @@ window.DB = (function () {
   // across "Erase all local data" (see wipe()) rather than reset to defaults.
   const WIPE_KEEP_KEYS = [
     'admin_pin', 'device_name', 'cashier_name', 'device_id', 'api_base',
-    'theme', 'scan_sound', 'scan_sound_volume'
+    'theme', 'scan_sound', 'scan_sound_volume', 'admin_key', 'welcome_seen'
   ];
   const WIPE_STASH_KEY = 'totals_wipe_keep';
 
