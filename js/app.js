@@ -1159,6 +1159,10 @@
     const storedApi = DB.getSetting('api_base');
     $('#setApiBase').value = (storedApi === null || storedApi === undefined) ? Config.DEFAULT_API_BASE : storedApi;
     updateSyncPill();
+    $('#adminKeyStatus').textContent = Sync.isAdminDevice()
+      ? '✓ Admin key saved — this device syncs every shop.'
+      : 'No admin key on this device — it only syncs the shop that signs in here.';
+    renderSignups();
     const q = tenantFilter.toLowerCase();
     const rows = DB.all("SELECT * FROM tenants WHERE status != 'deleted' ORDER BY name").filter((t) =>
       !q || (t.name + ' ' + (t.tin || '')).toLowerCase().includes(q));
@@ -1183,6 +1187,51 @@
         </div></td>
       </tr>`;
     }).join('');
+  }
+
+  /* ---------------- Sign-up requests (owner approval) ---------------- */
+  async function renderSignups() {
+    const body = $('#signupBody'); if (!body) return;
+    if (!Sync.configured()) { body.textContent = 'Cloud sync is off on this device.'; return; }
+    if (!Sync.isAdminDevice()) { body.textContent = 'Save your admin key under Cloud sync (below) to see and approve sign-ups on this device.'; return; }
+    if (!navigator.onLine) { body.textContent = 'Connect to the internet to see sign-up requests.'; return; }
+    body.textContent = 'Loading…';
+    let list;
+    try { list = (await Sync.listSignups()).requests || []; }
+    catch (e) { body.textContent = 'Could not load sign-ups: ' + ((e && e.message) || e); return; }
+    if (!list.length) { body.textContent = 'No sign-up requests yet.'; return; }
+    const order = { pending: 0, approved: 1, rejected: 2 };
+    list.sort((a, b) => (order[a.status] - order[b.status]) || String(b.created_at).localeCompare(String(a.created_at)));
+    const badge = (st) => st === 'pending' ? '<span class="badge suspended">Pending</span>'
+      : st === 'approved' ? '<span class="badge ok">Approved</span>' : '<span class="badge">Rejected</span>';
+    body.innerHTML = `<div class="table-wrap"><table class="data">
+      <thead><tr><th>Shop</th><th>Owner</th><th>Phones</th><th>Location</th><th>Login</th><th>Requested</th><th>Status</th><th></th></tr></thead>
+      <tbody>${list.map((r) => `<tr>
+        <td><b>${esc(r.shop_name)}</b><div class="muted" style="font-size:12px">${esc(r.currency || '')}</div></td>
+        <td>${esc(r.owner_name)}${r.email ? `<div class="muted" style="font-size:12px">${esc(r.email)}</div>` : ''}</td>
+        <td>${esc(r.phone)}${r.phone2 ? `<div class="muted" style="font-size:12px">${esc(r.phone2)}</div>` : ''}</td>
+        <td>${esc(r.address || '')}</td>
+        <td>${esc(r.username)}</td>
+        <td>${r.created_at ? new Date(r.created_at).toLocaleString() : ''}</td>
+        <td>${badge(r.status)}</td>
+        <td>${r.status === 'pending' ? `<div class="row-actions">
+          <button class="btn small brand" data-approvesignup="${esc(r.id)}">Approve</button>
+          <button class="btn small danger" data-rejectsignup="${esc(r.id)}">Reject</button></div>` : ''}</td>
+      </tr>`).join('')}</tbody></table></div>`;
+  }
+  async function decideSignup(id, approve) {
+    if (!approve && !confirm('Reject this sign-up request?')) return;
+    try {
+      if (approve) {
+        await Sync.approveSignup(id);
+        toast('Approved — shop created with a 3-day trial', 'ok');
+        await Sync.run(true);
+      } else {
+        await Sync.rejectSignup(id);
+        toast('Request rejected', 'ok');
+      }
+    } catch (e) { toast((e && e.message) || 'Failed', 'err'); }
+    renderAdmin();
   }
 
   // Plain date-math subscription summary for the Admin's own view (not the
@@ -1325,7 +1374,7 @@
   /* ---------------- Authentication & sessions ---------------- */
 
   // Tabs a cashier may not open. Managers/admins see everything.
-  const MANAGER_TABS = ['inventory', 'suppliers', 'settings'];
+  const MANAGER_TABS = ['inventory', 'suppliers', 'shop', 'settings'];
 
   function activeTenants() {
     return DB.all("SELECT * FROM tenants WHERE status != 'suspended' AND status != 'deleted' ORDER BY name");
@@ -1397,7 +1446,7 @@
   // may be granted Inventory access by a manager (per-staff permission).
   function applyRoleGating() {
     const isManager = canManage();
-    const allow = { inventory: isManager || canManageInventory(), suppliers: isManager, settings: isManager };
+    const allow = { inventory: isManager || canManageInventory(), suppliers: isManager, shop: isManager, settings: isManager };
     MANAGER_TABS.forEach((v) => {
       const tab = document.querySelector('.tab[data-view="' + v + '"]');
       if (tab) tab.classList.toggle('hidden-role', !allow[v]);
@@ -1431,34 +1480,146 @@
     if (!user || !pin) { err.textContent = 'Enter your username and PIN.'; return; }
 
     let tenant = findTenantByName(shop);
-    // First login on a fresh device (or a shop created on another device that
-    // hasn't reached here yet): fetch from the cloud on demand, then look again.
-    // If a normal sync still doesn't find it, do a full refresh from scratch —
-    // this catches a shop the incremental cursors skipped.
-    if (!tenant && Sync.configured() && navigator.onLine) {
-      err.style.color = 'var(--muted)'; err.textContent = 'Fetching your shop from the cloud…';
+    let staff = tenant ? DB.get('SELECT * FROM staff WHERE tenant_id = ? AND lower(username) = ? AND active = 1', [tenant.id, user]) : null;
+    let pinOk = !!staff && (await Config.hashPin(pin, staff.salt)) === staff.pin_hash;
+    const online = Sync.configured() && navigator.onLine;
+
+    // Not known here (fresh device, new shop, or a PIN changed elsewhere):
+    // check with the cloud, which hands back a pass for THIS shop only, then
+    // download that shop and look again.
+    let cloudErr = null;
+    if (!pinOk && online) {
+      err.style.color = 'var(--muted)'; err.textContent = 'Checking with the cloud…';
       btn.disabled = true;
-      try { await Sync.run(true); tenant = findTenantByName(shop); } catch (e) {}
-      if (!tenant) {
-        err.textContent = 'Still looking — refreshing all shops…';
-        try { await Sync.pullAll(); } catch (e) {}
-        tenant = findTenantByName(shop);
-      }
+      try {
+        const r = await Sync.login(shop, user, pin);
+        Config.setActiveTenant(r.tenant_id);
+        err.textContent = 'Downloading your shop…';
+        await Sync.run(true);
+        tenant = DB.get('SELECT * FROM tenants WHERE id = ?', [r.tenant_id]);
+        staff = tenant ? DB.get('SELECT * FROM staff WHERE tenant_id = ? AND lower(username) = ? AND active = 1', [tenant.id, user]) : null;
+        pinOk = !!staff && (await Config.hashPin(pin, staff.salt)) === staff.pin_hash;
+      } catch (e) { cloudErr = e; }
       btn.disabled = false; err.style.color = '';
     }
-    if (!tenant) {
+    if (!pinOk) {
       err.style.color = '';
-      err.textContent = Sync.configured()
-        ? 'Shop not found. Check the exact name, and make sure this device is online.'
-        : 'Shop not found on this device, and cloud sync is off.';
+      if (cloudErr && cloudErr.code === 'locked') err.textContent = 'Too many wrong attempts. Try again in 15 minutes.';
+      else if (cloudErr && cloudErr.code === 'suspended') err.textContent = 'This shop is suspended. Contact ' + Config.SUPPORT_PHONE + '.';
+      else if (cloudErr && cloudErr.code === 'invalid_login') err.textContent = 'Shop name, username or PIN is incorrect.';
+      else if (!tenant) err.textContent = online ? 'Shop not found. Check the exact name.'
+        : (Sync.configured() ? 'Shop not found on this device. Connect to the internet for a first sign-in.'
+          : 'Shop not found on this device, and cloud sync is off.');
+      else if (!staff) err.textContent = 'Unknown user for this shop.';
+      else err.textContent = 'Incorrect PIN.';
       return;
     }
-    const staff = DB.get('SELECT * FROM staff WHERE tenant_id = ? AND lower(username) = ? AND active = 1', [tenant.id, user]);
-    if (!staff) { err.textContent = 'Unknown user for this shop.'; return; }
-    const hash = await Config.hashPin(pin, staff.salt);
-    if (hash !== staff.pin_hash) { err.textContent = 'Incorrect PIN.'; return; }
-    signInAs({ tenant_id: tenant.id, staff_id: staff.id, name: staff.name, role: staff.role,
+    await signInAs({ tenant_id: tenant.id, staff_id: staff.id, name: staff.name, role: staff.role,
       can_view_sales: staff.can_view_sales ? 1 : 0, can_manage_inventory: staff.can_manage_inventory ? 1 : 0 });
+    // Signed in offline-first from local data: if this device has no cloud
+    // pass for the shop yet (set up before per-shop security), get one now.
+    if (online && !Sync.authHeaders()) {
+      Sync.login(tenant.name, user, pin).then(() => Sync.run(true)).catch(() => {});
+    }
+  }
+
+  /* ---------------- First-time quick guide ---------------- */
+  // Opens by itself the first time the app runs on a device; reopen any time
+  // from the login screen or Settings → About.
+  function showWelcome(force) {
+    if (!force && DB.getSetting('welcome_seen')) return;
+    $('#welcomeBack').classList.add('open');
+  }
+  function closeWelcome() {
+    $('#welcomeBack').classList.remove('open');
+    DB.setSetting('welcome_seen', '1'); DB.persistNow();
+  }
+
+  /* ---------------- Sign-up request (login screen) ---------------- */
+  function showLoginPanel(which) {
+    $('#loginPanel').hidden = which !== 'login';
+    $('#signupPanel').hidden = which !== 'signup';
+    $('#signupDone').hidden = which !== 'done';
+    $('.login-card').classList.toggle('wide', which === 'signup');
+    $('#signupErr').textContent = '';
+    $('#loginBack').scrollTop = 0;
+    if (which === 'signup') setTimeout(() => $('#suOwner').focus(), 50);
+  }
+  async function submitSignup() {
+    const err = $('#signupErr');
+    const v = (id) => $(id).value.trim();
+    const f = {
+      owner_name: v('#suOwner'), shop_name: v('#suShop'), phone: v('#suPhone'), phone2: v('#suPhone2'),
+      email: v('#suEmail'), address: v('#suAddress'), currency: $('#suCurrency').value,
+      username: v('#suUser').toLowerCase(), website: $('#suWebsite').value
+    };
+    const pin = $('#suPin').value, pin2 = $('#suPin2').value;
+    const phoneOk = (p) => /^[0-9+()\-\s]{7,20}$/.test(p);
+    err.style.color = '';
+    if (!f.owner_name) { err.textContent = 'Enter your full name.'; return; }
+    if (f.shop_name.length < 2) { err.textContent = 'Enter your shop name.'; return; }
+    if (!phoneOk(f.phone)) { err.textContent = 'Enter a valid phone number.'; return; }
+    if (f.phone2 && !phoneOk(f.phone2)) { err.textContent = 'Enter a valid second phone number (or leave it empty).'; return; }
+    if (f.email && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(f.email)) { err.textContent = 'Enter a valid email (or leave it empty).'; return; }
+    if (!f.address) { err.textContent = 'Enter your shop location.'; return; }
+    if (!/^[a-z0-9._-]{2,30}$/.test(f.username)) { err.textContent = 'Username: 2–30 letters or numbers, no spaces.'; return; }
+    if (!/^[0-9]{4,8}$/.test(pin)) { err.textContent = 'PIN must be 4–8 digits.'; return; }
+    if (pin !== pin2) { err.textContent = 'The two PINs do not match.'; return; }
+    if (!Sync.configured() || !navigator.onLine) { err.textContent = 'You need an internet connection to sign up.'; return; }
+    // Only a salted hash of the PIN ever leaves this device.
+    f.salt = Config.randomSalt();
+    f.pin_hash = await Config.hashPin(pin, f.salt);
+    const btn = $('#signupSendBtn');
+    btn.disabled = true; err.style.color = 'var(--muted)'; err.textContent = 'Sending…';
+    try {
+      await Sync.signup(f);
+      $('#signupSummary').innerHTML =
+        '<div><span>Shop name</span><b>' + esc(f.shop_name) + '</b></div>' +
+        '<div><span>Username</span><b>' + esc(f.username) + '</b></div>' +
+        '<div><span>PIN</span><b>the one you chose</b></div>';
+      ['#suOwner', '#suShop', '#suPhone', '#suPhone2', '#suEmail', '#suAddress', '#suPin', '#suPin2'].forEach((id) => { $(id).value = ''; });
+      $('#loginShop').value = f.shop_name; $('#loginUser').value = f.username;
+      showLoginPanel('done');
+    } catch (e) {
+      err.style.color = '';
+      err.textContent = (e && e.status && e.message) ? e.message : 'Could not send — check your internet connection and try again.';
+    } finally { btn.disabled = false; }
+  }
+
+  // Reconnect a device that is signed in locally but has no cloud pass for
+  // its shop (asks the signed-in staff member for their PIN once).
+  function reconnectCloudModal() {
+    const s = Config.currentSession();
+    const t = Config.activeTenant();
+    const st = s && s.staff_id ? DB.get('SELECT * FROM staff WHERE id = ?', [s.staff_id]) : null;
+    if (!t || !st) { toast('Sign out and sign in again while online to connect the cloud.', 'err'); return; }
+    openModal(`
+      <header><h3>Connect to the cloud</h3><button class="x" data-close>×</button></header>
+      <div class="body">
+        <p class="muted">For security, each device now needs a one-time cloud sign-in for <b>${esc(t.name)}</b>.
+          Enter the PIN for <b>${esc(st.username)}</b>. Your sales are safe on this device in the meantime.</p>
+        <label>PIN</label><input id="rcPin" type="password" inputmode="numeric" autocomplete="current-password">
+        <p class="login-err" id="rcErr"></p>
+      </div>
+      <div class="foot"><button class="btn ghost" data-close>Later</button><button class="btn brand" id="rcGo">Connect</button></div>`);
+    const m = $('#modal');
+    $$('[data-close]', m).forEach((b) => b.addEventListener('click', closeModal));
+    setTimeout(() => $('#rcPin', m).focus(), 50);
+    const go = async () => {
+      const e = $('#rcErr', m);
+      if (!navigator.onLine) { e.textContent = 'This device is offline.'; return; }
+      e.textContent = 'Connecting…';
+      try {
+        await Sync.login(t.name, st.username, $('#rcPin', m).value);
+        closeModal(); toast('Cloud connected', 'ok'); Sync.run(true);
+      } catch (err) {
+        e.textContent = err.code === 'locked' ? 'Too many wrong attempts. Try again in 15 minutes.'
+          : err.code === 'invalid_login' ? 'Incorrect PIN — or this shop has not been added to the cloud yet (new shops join through Sign up).'
+          : ((err && err.message) || 'Could not connect.');
+      }
+    };
+    $('#rcGo', m).addEventListener('click', go);
+    $('#rcPin', m).addEventListener('keydown', (ev) => { if (ev.key === 'Enter') go(); });
   }
 
   async function signInAs(session) {
@@ -1473,6 +1634,7 @@
     cart = [];
     applyRoleGating();
     updateTopbar();
+    updateSyncPill();
     await Config.refreshLicenseState(session.tenant_id);
     refreshLicenseUI();
     renderPOS(); renderCart();
@@ -1486,6 +1648,7 @@
     Config.setSession(null);
     cart = [];
     updateTopbar();
+    updateSyncPill();
     showLogin();
   }
 
@@ -1672,8 +1835,11 @@
     extra: { analytics: true, remote_sales: true, import_inventory: true, expiry_tracking: true },
     basic: { analytics: false, remote_sales: false, import_inventory: false, expiry_tracking: false }
   };
-  const DURATION_DAYS = { '3d': 3, '1m': 30, '3m': 91, '6m': 182, '12m': 365 };
-  const DURATION_LABEL = { '3d': '3 days (trial)', '1m': '1 month', '3m': '3 months', '6m': '6 months', '12m': '12 months' };
+  const DURATION_DAYS = { '1d': 1, '3d': 3, '1m': 30, '3m': 91, '6m': 182, '12m': 365 };
+  const DURATION_LABEL = { '1d': '24 hours', '3d': '3 days (trial)', '1m': '1 month', '3m': '3 months', '6m': '6 months', '12m': '12 months' };
+  // Days of grace after expiry. A 24-hour pass gets none — 5 extra days would
+  // turn a day pass into nearly a week.
+  const GRACE_DAYS_FOR = { '1d': 0 };
 
   function subscriptionModal(tid) {
     const t = DB.get('SELECT * FROM tenants WHERE id = ?', [tid]);
@@ -1703,6 +1869,7 @@
           </div>
           <div><label>Duration</label>
             <select id="subDuration">
+              <option value="1d">24 hours</option>
               <option value="3d">3 days (trial)</option>
               <option value="1m">1 month</option>
               <option value="3m">3 months</option>
@@ -1740,7 +1907,8 @@
       const startBase = (extend && existing && existing.expires_at && new Date(existing.expires_at) > new Date())
         ? new Date(existing.expires_at) : new Date();
       const expiresAt = new Date(startBase.getTime() + DURATION_DAYS[durationKey] * 86400000);
-      const graceUntil = new Date(expiresAt.getTime() + 5 * 86400000);
+      const graceDays = GRACE_DAYS_FOR[durationKey] != null ? GRACE_DAYS_FOR[durationKey] : 5;
+      const graceUntil = new Date(expiresAt.getTime() + graceDays * 86400000);
       const entitlements = PLAN_ENTITLEMENTS[plan];
 
       DB.run(`INSERT INTO subscriptions(tenant_id,plan,status,started_at,expires_at,grace_until,entitlements,updated_at,created_at)
@@ -1797,7 +1965,7 @@
     const base = Config.apiBase();
     L.push('API base: ' + (base || '(offline / not set)'));
     L.push('Online: ' + navigator.onLine + '   Configured: ' + Sync.configured());
-    L.push('Cursors: ' + (DB.getSetting('sync_cursors') || '(none yet)'));
+    L.push('Cursors: ' + (DB.getSetting('sync_cursors:' + (Sync.isAdminDevice() ? 'admin' : Config.activeTenantId())) || '(none yet)'));
     L.push('Last sync: ' + (DB.getSetting('last_sync_at') || 'never'));
 
     const pend = DB.get('SELECT COUNT(*) AS n FROM sync_queue');
@@ -1815,7 +1983,10 @@
 
     if (base) {
       try {
-        const res = await fetch(base + '/api/pull?since=0', { headers: { 'Content-Type': 'application/json' }, cache: 'no-store' });
+        const auth = Sync.authHeaders();
+        if (!auth) throw new Error('this device has no cloud access yet (sign in online, or save the admin key)');
+        L.push('Access: ' + (auth['X-Admin-Key'] ? 'admin key (all shops)' : 'shop token (this shop only)'));
+        const res = await fetch(base + '/api/pull?since=0', { headers: Object.assign({ 'Content-Type': 'application/json' }, auth), cache: 'no-store' });
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const j = await res.json();
         const st = Array.isArray(j.tenants) ? j.tenants : [];
@@ -1852,6 +2023,15 @@
   // it ever requires connectivity at the moment it runs.
 
   function fmtDate(d) { return d ? new Date(d).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '—'; }
+  function fmtDateTime(d) {
+    return d ? new Date(d).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
+  }
+  // "5 days" / "1 day", or hours in the final day ("3 hours").
+  function timeLeft(until) {
+    const ms = new Date(until) - new Date();
+    if (ms < 86400000) { const h = Math.max(1, Math.ceil(ms / 3600000)); return h + ' hour' + (h === 1 ? '' : 's'); }
+    const d = Math.ceil(ms / 86400000); return d + ' day' + (d === 1 ? '' : 's');
+  }
 
   // Bottom-of-Sell-tab banner: nothing normally; an amber heads-up in the
   // last 5 days before expiry; a red countdown once in the grace period.
@@ -1860,13 +2040,12 @@
     const st = Config.getLicenseState();
     if (st.state === 'grace') {
       el.hidden = false; el.className = 'license-banner grace';
-      const d = st.graceDaysLeft;
       el.textContent = '⚠ Subscription expired. Service will be disabled in '
-        + (d != null ? d + ' day' + (d === 1 ? '' : 's') : 'a few days') + ' unless renewed.';
+        + (st.graceUntil ? timeLeft(st.graceUntil) : 'a few days') + ' unless renewed — Contact ' + Config.SUPPORT_PHONE + ' to renew.';
     } else if (st.warning) {
       el.hidden = false; el.className = 'license-banner warn';
-      const d = st.daysLeft;
-      el.textContent = '⏳ Subscription expires in ' + (d != null ? d + ' day' + (d === 1 ? '' : 's') : 'a few days') + ' — renew to avoid interruption.';
+      el.textContent = '⏳ Subscription expires in ' + (st.expiresAt ? timeLeft(st.expiresAt) : 'a few days')
+        + ' — Contact ' + Config.SUPPORT_PHONE + ' to renew and avoid interruption.';
     } else {
       el.hidden = true;
     }
@@ -1918,8 +2097,9 @@
     const rows = [
       ['Plan', st.plan ? st.plan.charAt(0).toUpperCase() + st.plan.slice(1) : '—'],
       ['Status', label],
-      ['Expires', fmtDate(st.expiresAt)],
-      ['Grace period ends', fmtDate(st.graceUntil)]
+      ['Expires', fmtDateTime(st.expiresAt)],
+      ['Grace period ends', fmtDateTime(st.graceUntil)],
+      ['To renew', 'Call ' + Config.SUPPORT_PHONE]
     ];
     el.innerHTML = rows.map(([k, v]) => `<div style="display:flex;justify-content:space-between"><span>${k}</span><b>${esc(String(v))}</b></div>`).join('');
   }
@@ -1936,6 +2116,10 @@
     const dot2 = $('#syncDot2');
     if (!Sync.configured()) {
       dot.className = 'dot warn'; txt.textContent = 'Local only';
+    } else if (!Sync.authHeaders() && Config.currentSession()) {
+      // Signed in locally but this device has no cloud pass for the shop yet
+      // (e.g. it was set up before per-shop security) — tap to reconnect.
+      dot.className = 'dot warn'; txt.textContent = 'Tap to connect cloud' + (pending ? ' (' + pending + ')' : '');
     } else if (state && state.state === 'syncing') {
       dot.className = 'dot warn'; txt.textContent = 'Syncing…';
     } else if (state && state.state === 'error') {
@@ -2178,6 +2362,66 @@
     if (name === 'reports') { repShowFigures = false; repFrom = repTo = repSearch = ''; renderReports(); }
     if (name === 'admin') renderAdmin();
     if (name === 'settings') loadSettings();
+    if (name === 'shop') loadShop();
+  }
+
+  /* ---------------- Shop tab (managers & admins) ---------------- */
+  const SHOP_FIELDS = { shopName: 'name', shopTin: 'tin', shopPhone: 'phone', shopAddress: 'address', shopFooter: 'receipt_footer' };
+  function loadShop() {
+    const t = Config.activeTenant() || {};
+    Object.keys(SHOP_FIELDS).forEach((id) => { $('#' + id).value = t[SHOP_FIELDS[id]] || ''; });
+    $('#shopSaveMsg').textContent = '';
+    renderShopPreview();
+  }
+  function shopFormValues() {
+    const vals = {};
+    Object.keys(SHOP_FIELDS).forEach((id) => { vals[SHOP_FIELDS[id]] = $('#' + id).value.trim(); });
+    return vals;
+  }
+  // A sample sale using this shop's real items, VAT and receipt options, shown
+  // in an isolated frame with the exact print styles.
+  function renderShopPreview() {
+    const frame = $('#shopPreview'); if (!frame) return;
+    const t = Object.assign({}, Config.activeTenant() || {}, shopFormValues());
+    if (!t.name) t.name = 'Your shop name';
+    const vs = DB.all(`SELECT v.*, p.name AS pname FROM variations v JOIN products p ON p.id = v.product_id
+      WHERE v.tenant_id = ? AND v.active = 1 AND p.active = 1 ORDER BY p.name LIMIT 2`, [t.id || '']);
+    const lines = vs.length ? vs.map((v, i) => ({ name: v.pname + (v.name && v.name !== 'Default' ? ' · ' + v.name : ''),
+      qty: i + 1, unit_price: Config.effectivePrice(v), list_price: Number(v.price) || 0 }))
+      : [{ name: 'Sample item', qty: 2, unit_price: 500, list_price: 500 }, { name: 'Another item', qty: 1, unit_price: 1200, list_price: 1200 }];
+    const items = lines.map((l) => Object.assign(l, { line_total: l.unit_price * l.qty }));
+    const gross = items.reduce((n, it) => n + it.line_total, 0);
+    const vatOn = !!t.vat_enabled && Number(t.vat_rate) > 0;
+    const b = Config.vatBreakdown(gross, vatOn ? t.vat_rate : 0, !!t.vat_inclusive);
+    const total = Math.round(b.gross * 100) / 100;
+    const cash = total;
+    const sale = { receipt_no: 'PREVIEW-000001', order_no: 1, created_at: new Date().toISOString(),
+      cashier: Config.cashierName(), subtotal: b.net, vat_amount: b.vat, total, cash_received: cash,
+      change_due: cash - total, vat_inclusive: t.vat_inclusive ? 1 : 0, vat_rate: t.vat_rate, service_charge: 0 };
+    frame.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><style>' + Receipt.PRINT_CSS +
+      '</style></head><body>' + Receipt.build(sale, items, t) + '</body></html>';
+  }
+  async function saveShop() {
+    const t = Config.activeTenant(); if (!t) return;
+    const msg = $('#shopSaveMsg');
+    const vals = shopFormValues();
+    if (vals.name.length < 2) { toast('Enter the shop name', 'err'); return; }
+    // The shop name is also the sign-in name, so it must stay unique across
+    // the cloud — check before renaming (needs the internet).
+    if (vals.name.toLowerCase() !== String(t.name || '').trim().toLowerCase() && Sync.configured()) {
+      if (!navigator.onLine) { toast('Connect to the internet to change the shop name', 'err'); return; }
+      try {
+        if (!(await Sync.shopNameAvailable(vals.name))) { toast('Another shop already uses that name', 'err'); return; }
+      } catch (e) { toast('Could not check the name with the cloud — try again', 'err'); return; }
+    }
+    const now = DB.nowISO();
+    DB.run('UPDATE tenants SET name=?, tin=?, phone=?, address=?, receipt_footer=?, updated_at=? WHERE id=?',
+      [vals.name, vals.tin, vals.phone, vals.address, vals.receipt_footer, now, t.id]);
+    Sync.queue('tenant', t.id, 'update', Object.assign({ id: t.id, updated_at: now }, vals), t.id);
+    DB.persistNow();
+    updateTopbar();
+    msg.textContent = 'Saved ' + new Date().toLocaleTimeString() + '.';
+    toast('Shop details saved', 'ok');
   }
 
   function loadSettings() {
@@ -2219,6 +2463,16 @@
 
     // Login / sign out
     $('#loginBtn').addEventListener('click', attemptLogin);
+    $('#signupOpenBtn').addEventListener('click', () => showLoginPanel('signup'));
+    $('#signupBackBtn').addEventListener('click', () => showLoginPanel('login'));
+    $('#signupDoneBtn').addEventListener('click', () => showLoginPanel('login'));
+    $('#signupSendBtn').addEventListener('click', submitSignup);
+    $('#welcomeOpenBtn').addEventListener('click', () => showWelcome(true));
+    $('#welcomeCloseBtn').addEventListener('click', closeWelcome);
+    Object.keys(SHOP_FIELDS).forEach((id) => $('#' + id).addEventListener('input', renderShopPreview));
+    $('#shopSaveBtn').addEventListener('click', saveShop);
+    $('#shopResetBtn').addEventListener('click', loadShop);
+    $('#welcomeAgainBtn').addEventListener('click', () => showWelcome(true));
     $('#loginShop').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#loginUser').focus(); });
     $('#loginPin').addEventListener('keydown', (e) => { if (e.key === 'Enter') attemptLogin(); });
     $('#loginUser').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#loginPin').focus(); });
@@ -2445,6 +2699,39 @@
       $('#setApiBase').value = '';
       updateSyncPill(); toast('Cloud sync turned off (offline)', 'ok');
     });
+    $('#refreshSignupsBtn').addEventListener('click', renderSignups);
+    $('#signupBody').addEventListener('click', (e) => {
+      const ap = e.target.closest('[data-approvesignup]'); const rj = e.target.closest('[data-rejectsignup]');
+      if (ap) decideSignup(ap.dataset.approvesignup, true);
+      if (rj) decideSignup(rj.dataset.rejectsignup, false);
+    });
+    $('#saveAdminKeyBtn').addEventListener('click', async () => {
+      const key = $('#setAdminKey').value.trim();
+      const st = $('#adminKeyStatus');
+      if (!key) { toast('Paste the admin key first', 'err'); return; }
+      const prev = DB.getSetting('admin_key');
+      DB.setSetting('admin_key', key);
+      st.textContent = 'Checking key…';
+      try {
+        const r = await Sync.test();
+        if (r.scope !== 'admin') throw new Error('The cloud did not accept this key.');
+        $('#setAdminKey').value = ''; DB.persistNow();
+        toast('Admin key saved', 'ok');
+        await Sync.run(true);
+      } catch (e) {
+        DB.setSetting('admin_key', prev || '');
+        toast((e && e.message) || 'Could not check the key', 'err');
+      }
+      renderAdmin();
+    });
+    $('#clearAdminKeyBtn').addEventListener('click', () => {
+      if (!confirm('Remove the admin key from this device? It will then only sync the shop that signs in here.')) return;
+      DB.setSetting('admin_key', ''); DB.persistNow();
+      toast('Admin key removed', 'ok'); renderAdmin(); updateSyncPill();
+    });
+    $('#syncPill').addEventListener('click', () => {
+      if (Sync.configured() && !Sync.authHeaders() && Config.currentSession()) reconnectCloudModal();
+    });
     $('#testCloudBtn').addEventListener('click', async () => {
       const el = $('#cloudTestResult');
       const base = $('#setApiBase').value.trim();
@@ -2452,7 +2739,9 @@
       try {
         const r = await Sync.test(base);
         el.style.color = 'var(--ok)';
-        el.textContent = '✓ Connected — ' + r.tenants + ' tenant(s) visible on the server.';
+        el.textContent = r.scope === 'admin' ? '✓ Connected with the admin key — this device syncs every shop.'
+          : r.scope === 'tenant' ? '✓ Connected — this device syncs its own shop only.'
+          : '✓ Server reachable. Sign in as staff (or save the admin key below) to start syncing.';
         toast('Cloud connection OK', 'ok');
       } catch (e) {
         el.style.color = 'var(--danger)';
@@ -2665,6 +2954,11 @@
       Config.setSession(null);
       await Config.refreshLicenseState();
       showLogin();
+    }
+    showWelcome();
+    // Signed in from before per-shop cloud security: point at the fix.
+    if (Config.currentSession() && Sync.configured() && !Sync.authHeaders()) {
+      setTimeout(() => toast('Tap “Tap to connect cloud” at the top to reconnect cloud backup.'), 1500);
     }
   }
 

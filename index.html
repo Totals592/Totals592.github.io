@@ -21,15 +21,82 @@
   <div class="login-back" id="loginBack">
     <div class="login-card">
       <div class="brand" style="justify-content:center;font-size:22px;margin-bottom:6px"><img src="./icons/icon.svg" alt=""> TS - POS</div>
-      <p class="muted center" style="margin-top:0">Sign in to your shop</p>
-      <label>Shop name</label>
-      <input id="loginShop" placeholder="Type your shop name" autocomplete="off">
-      <label>Username</label>
-      <input id="loginUser" autocomplete="username" placeholder="e.g. manager">
-      <label>PIN</label>
-      <input id="loginPin" type="password" inputmode="numeric" autocomplete="current-password" placeholder="PIN">
-      <div id="loginErr" class="login-err"></div>
-      <button class="charge" id="loginBtn" style="margin-top:14px">Sign in</button>
+      <div id="loginPanel">
+        <p class="muted center" style="margin-top:0">Sign in to your shop</p>
+        <label>Shop name</label>
+        <input id="loginShop" placeholder="Type your shop name" autocomplete="off">
+        <label>Username</label>
+        <input id="loginUser" autocomplete="username" placeholder="e.g. manager">
+        <label>PIN</label>
+        <input id="loginPin" type="password" inputmode="numeric" autocomplete="current-password" placeholder="PIN">
+        <div id="loginErr" class="login-err"></div>
+        <button class="charge" id="loginBtn" style="margin-top:14px">Sign in</button>
+        <button class="btn signup-btn" id="signupOpenBtn">Sign up</button>
+        <p class="signup-note">Sign up here to get a three days trial before you commit</p>
+        <button class="link-btn" id="welcomeOpenBtn">New here? How TS - POS works</button>
+      </div>
+
+      <!-- Sign-up request: reviewed and approved by the owner in Admin -->
+      <div id="signupPanel" hidden>
+        <p class="muted center" style="margin-top:0">Request your shop — 3-day free trial</p>
+        <label>Your full name *</label>
+        <input id="suOwner" autocomplete="name" maxlength="80">
+        <label>Shop / business name *</label>
+        <input id="suShop" autocomplete="organization" maxlength="80" placeholder="This is what you'll type to sign in">
+        <div class="grid2">
+          <div><label>Phone number *</label><input id="suPhone" type="tel" inputmode="tel" autocomplete="tel" maxlength="20" placeholder="e.g. 592-600-0000"></div>
+          <div><label>Second phone / WhatsApp</label><input id="suPhone2" type="tel" inputmode="tel" maxlength="20" placeholder="optional"></div>
+        </div>
+        <label>Email</label>
+        <input id="suEmail" type="email" autocomplete="email" maxlength="120" placeholder="optional">
+        <label>Shop location / address *</label>
+        <input id="suAddress" autocomplete="street-address" maxlength="200">
+        <label>Currency</label>
+        <select id="suCurrency">
+          <option value="GYD" selected>GYD — Guyana dollar</option>
+          <option value="USD">USD — US dollar</option>
+          <option value="EUR">EUR — Euro</option>
+          <option value="GBP">GBP — British pound</option>
+        </select>
+        <div class="grid2">
+          <div><label>Choose a username *</label><input id="suUser" autocomplete="off" autocapitalize="none" maxlength="30" value="manager"></div>
+          <div><label>Choose a PIN (4–8 digits) *</label><input id="suPin" type="password" inputmode="numeric" autocomplete="new-password" maxlength="8"></div>
+        </div>
+        <label>Confirm PIN *</label>
+        <input id="suPin2" type="password" inputmode="numeric" autocomplete="new-password" maxlength="8">
+        <!-- Hidden from people; bots that fill every field reveal themselves. -->
+        <input id="suWebsite" class="hp" tabindex="-1" autocomplete="off" aria-hidden="true">
+        <div id="signupErr" class="login-err"></div>
+        <button class="charge" id="signupSendBtn" style="margin-top:10px">Send request</button>
+        <button class="link-btn" id="signupBackBtn">← Back to sign in</button>
+      </div>
+
+      <div id="signupDone" hidden>
+        <div class="center" style="font-size:40px;margin:6px 0">✅</div>
+        <h3 class="center" style="margin:0 0 8px">Request sent!</h3>
+        <p class="muted" style="margin:0 0 10px">We'll review it and activate your shop shortly. Your <b>3-day free trial</b> starts as soon as it's activated.</p>
+        <div class="signup-summary" id="signupSummary"></div>
+        <p class="muted" style="margin:10px 0">Questions? Call or WhatsApp <b>+592-719-9057</b>.</p>
+        <button class="charge" id="signupDoneBtn">Back to sign in</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- First-time quick guide (shown once per device; reopen from Settings → About) -->
+  <div class="welcome-back" id="welcomeBack">
+    <div class="welcome-card" role="dialog" aria-labelledby="welcomeTitle">
+      <div class="brand" style="justify-content:center;font-size:20px"><img src="./icons/icon.svg" alt=""> TS - POS</div>
+      <h3 class="center" id="welcomeTitle" style="margin:6px 0 12px">Welcome! Here's how it works</h3>
+      <ol class="welcome-steps">
+        <li><span>🔑</span><div><b>Sign in</b> with your shop name, username and PIN. New shop? Tap <b>Sign up</b> for a free 3-day trial.</div></li>
+        <li><span>🧾</span><div><b>Sell</b> — tap items (or scan a barcode) to add them, tap <b>Charge</b>, enter the cash received, then <b>Complete</b> to print the receipt.</div></li>
+        <li><span>📦</span><div><b>Inventory</b> — managers add products, prices, stock and discounts. Low stock shows in <b>Reports</b>.</div></li>
+        <li><span>🏪</span><div><b>Shop</b> — managers set the shop name, TIN, phone, address and receipt message, with a live receipt preview.</div></li>
+        <li><span>📶</span><div><b>No internet? Keep selling.</b> Sales are saved on the device and upload automatically when you're back online.</div></li>
+        <li><span>📲</span><div><b>Install it:</b> iPad/iPhone — Share → <i>Add to Home Screen</i>. Android/PC — <i>Install app</i> from the browser menu.</div></li>
+      </ol>
+      <p class="muted center" style="margin:10px 0">Need help? Call or WhatsApp <b>+592-719-9057</b></p>
+      <button class="charge" id="welcomeCloseBtn">Got it — let's start</button>
     </div>
   </div>
 
@@ -40,7 +107,7 @@
     <div class="login-card center">
       <div style="font-size:40px">⛔</div>
       <h3 style="margin:10px 0 4px">Service is disabled</h3>
-      <p class="muted" id="licenseLockMsg">This shop's subscription has expired.</p>
+      <p class="muted" id="licenseLockMsg">This shop's subscription has expired. Contact <b>+592-719-9057</b> to renew.</p>
       <div id="licenseLockDetails" class="hint" style="margin:10px 0"></div>
       <div id="licenseLockAdminArea">
         <button class="btn small" id="licenseLockAdminBtn">Administrator access</button>
@@ -76,6 +143,7 @@
         <button class="tab" data-view="suppliers">🚚 Suppliers</button>
         <button class="tab" data-view="reports">📊 Reports</button>
         <button class="tab" data-view="admin">🏢 Admin</button>
+        <button class="tab" data-view="shop">🏪 Shop</button>
         <button class="tab" data-view="settings">⚙️ Settings</button>
       </nav>
 
@@ -204,6 +272,10 @@
               <button class="btn brand" id="addTenantBtn">+ New tenant</button>
               <button class="btn" id="adminLockBtn">Lock</button>
             </div>
+            <div class="card" id="signupCard">
+              <div class="section-title"><h3>Sign-up requests</h3><button class="btn small" id="refreshSignupsBtn">Refresh</button></div>
+              <div id="signupBody" class="muted">—</div>
+            </div>
             <div class="card">
               <div class="section-title"><h3>Tenant accounts</h3><span class="muted">Create, rename, suspend or configure each shop</span></div>
               <div class="table-wrap">
@@ -229,6 +301,16 @@
                 <span class="pill"><span class="dot" id="syncDot2"></span><span id="lastSync">—</span></span>
               </div>
               <p class="hint" id="cloudTestResult"></p>
+              <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line)">
+                <label>Admin key (owner's devices only)</label>
+                <p class="hint" style="margin:0 0 6px">Shop devices only ever download their own shop. Saving your admin key here lets THIS device see and manage every shop and approve sign-ups. Never enter it on a customer's device.</p>
+                <div class="toolbar" style="margin:0">
+                  <input class="grow" id="setAdminKey" type="password" autocomplete="off" placeholder="Paste the ADMIN_KEY you set in Supabase">
+                  <button class="btn brand" id="saveAdminKeyBtn">Save key</button>
+                  <button class="btn" id="clearAdminKeyBtn">Remove</button>
+                </div>
+                <p class="hint" id="adminKeyStatus"></p>
+              </div>
               <div class="toolbar" style="margin-top:8px">
                 <button class="btn" id="syncDiagBtn">Run sync diagnostics</button>
                 <button class="btn" id="pullAllBtn">Force full refresh</button>
@@ -248,6 +330,36 @@
         </section>
 
         <!-- ===================== SETTINGS ===================== -->
+        <!-- ===================== SHOP (managers & admins) ===================== -->
+        <section class="view" id="view-shop">
+          <div class="shop-grid">
+            <div class="card">
+              <h3>Shop details</h3>
+              <p class="muted">These print at the top and bottom of every receipt.</p>
+              <label>Shop name</label>
+              <input id="shopName" maxlength="80">
+              <p class="hint" style="margin:4px 0 0">Staff type this name to sign in — tell them if you change it.</p>
+              <label>TIN number</label>
+              <input id="shopTin" maxlength="40">
+              <label>Phone number</label>
+              <input id="shopPhone" type="tel" inputmode="tel" maxlength="40">
+              <label>Location / address</label>
+              <input id="shopAddress" maxlength="200">
+              <label>Receipt footer message</label>
+              <textarea id="shopFooter" rows="3" maxlength="300" placeholder="Thank you!"></textarea>
+              <div class="toolbar" style="margin-top:12px">
+                <button class="btn brand" id="shopSaveBtn">Save shop details</button>
+                <button class="btn" id="shopResetBtn">Undo changes</button>
+              </div>
+              <p class="hint" id="shopSaveMsg"></p>
+            </div>
+            <div class="card">
+              <div class="section-title"><h3>Receipt preview</h3><span class="muted">Updates as you type</span></div>
+              <iframe id="shopPreview" class="receipt-preview" title="Receipt preview"></iframe>
+            </div>
+          </div>
+        </section>
+
         <section class="view" id="view-settings">
           <div class="card">
             <h3>This device</h3>
@@ -349,6 +461,7 @@
             <p class="muted">Totals POS <span id="appVersion">—</span> · Offline-first PWA · SQLite (WebAssembly) · Multi-tenant.</p>
             <div class="toolbar" style="margin-top:8px">
               <button class="btn" id="checkUpdateBtn">Check for update</button>
+              <button class="btn" id="welcomeAgainBtn">Show quick guide</button>
             </div>
             <p class="hint">Installed as an app? Updates are checked automatically, but if this device has been offline or closed for a while, tap the button above after reconnecting to fetch the latest version right away.</p>
           </div>

@@ -50,6 +50,9 @@ window.Config = (function () {
   // explicit empty value = run offline) in Admin → Cloud sync.
   const DEFAULT_API_BASE = 'https://wisnnbbodcertkaebojo.functions.supabase.co';
 
+  // Who customers call to sign up, renew, or get help.
+  const SUPPORT_PHONE = '+592-719-9057';
+
   function apiBase() {
     const s = DB.getSetting('api_base'); // null = never set → use default; '' = admin turned it off
     let base = (s === null || s === undefined) ? DEFAULT_API_BASE : s;
@@ -243,7 +246,7 @@ window.Config = (function () {
     CURRENCY_SYMBOLS, money, vatBreakdown,
     activeTenantId, activeTenant, setActiveTenant,
     apiBase, deviceName, deviceId, cashierName: cashierNameResolved, adminPin,
-    DEFAULT_API_BASE, effectivePrice, hasDiscount,
+    DEFAULT_API_BASE, SUPPORT_PHONE, effectivePrice, hasDiscount,
     nextReceiptNo, nextOrderNo, todayKey, escapeHtml,
     randomSalt, hashPin, currentSession, setSession, currentRole,
     verifyLicenseToken, getLicenseState, refreshLicenseState

@@ -26,6 +26,25 @@ window.Sync = (function () {
   function isOnline() { return navigator.onLine; }
   function configured() { return !!Config.apiBase(); }
 
+  /* ---------- Who is this device to the cloud? ----------
+   * The owner's device holds the admin key and syncs every shop. Any other
+   * device holds a token for ONE shop, issued when a staff member of that shop
+   * signs in online — the cloud only ever sends it that shop's data. */
+  function tokenFor(tid) { return tid ? DB.getSetting('sync_token_' + tid) : null; }
+  function hasToken(tid) { return !!tokenFor(tid); }
+  function authHeaders() {
+    const key = DB.getSetting('admin_key');
+    if (key) return { 'X-Admin-Key': key };
+    const tok = tokenFor(Config.activeTenantId());
+    return tok ? { 'X-Device-Token': tok } : null;
+  }
+  // Cursor/outbox scope: 'admin' (all shops) or the active shop's id.
+  function scope() {
+    if (DB.getSetting('admin_key')) return 'admin';
+    const tid = Config.activeTenantId();
+    return tokenFor(tid) ? tid : null;
+  }
+
   function queue(entity, entityId, op, payload, tenantId) {
     DB.run(
       `INSERT INTO sync_queue(id,tenant_id,entity,entity_id,op,payload,attempts,created_at)
@@ -40,23 +59,44 @@ window.Sync = (function () {
     scheduleSoon();
   }
 
+  // Uploads this device can actually send (a shop device only sends its own
+  // shop's changes).
   function pendingCount() {
-    const r = DB.get('SELECT COUNT(*) AS n FROM sync_queue');
+    const sc = scope();
+    const r = sc && sc !== 'admin'
+      ? DB.get('SELECT COUNT(*) AS n FROM sync_queue WHERE tenant_id = ?', [sc])
+      : DB.get('SELECT COUNT(*) AS n FROM sync_queue');
     return r ? r.n : 0;
   }
 
-  async function apiFetch(path, opts) {
+  // `auth: false` for the public endpoints (sign-in, sign-up).
+  async function apiFetch(path, opts, auth) {
     const base = Config.apiBase();
-    const res = await fetch(base + path, Object.assign({
-      headers: { 'Content-Type': 'application/json' }
-    }, opts));
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    return res.json();
+    const headers = Object.assign({ 'Content-Type': 'application/json' }, auth === false ? {} : (authHeaders() || {}));
+    const res = await fetch(base + path, Object.assign({}, opts, { headers }));
+    let body = null;
+    try { body = await res.json(); } catch (e) {}
+    if (!res.ok) {
+      const err = new Error((body && body.message) || ('HTTP ' + res.status));
+      err.status = res.status; err.code = body && body.error;
+      // The cloud no longer accepts this shop token (staff removed, shop
+      // deleted, or keys rotated): forget it so the next sign-in renews it.
+      if (res.status === 401 && auth !== false && !DB.getSetting('admin_key')) {
+        DB.setSetting('sync_token_' + Config.activeTenantId(), '');
+      }
+      throw err;
+    }
+    return body;
   }
 
   /* ---------- PUSH: upload the outbox ---------- */
   async function push() {
-    const rows = DB.all('SELECT * FROM sync_queue ORDER BY created_at LIMIT 100');
+    // A shop device only uploads its own shop's changes; anything queued for
+    // another shop waits until someone from that shop signs in here.
+    const sc = scope();
+    const rows = sc === 'admin'
+      ? DB.all('SELECT * FROM sync_queue ORDER BY created_at LIMIT 100')
+      : DB.all('SELECT * FROM sync_queue WHERE tenant_id = ? ORDER BY created_at LIMIT 100', [sc]);
     if (!rows.length) return { pushed: 0 };
     const changes = rows.map((r) => ({
       id: r.id, tenant_id: r.tenant_id, entity: r.entity,
@@ -68,8 +108,13 @@ window.Sync = (function () {
       body: JSON.stringify({ device: Config.deviceName(), changes })
     });
     const applied = new Set(out.applied || []);
+    const rejected = new Set(out.rejected || []);
     rows.forEach((r) => {
-      if (applied.has(r.id)) {
+      if (rejected.has(r.id)) {
+        // Refused by the cloud for this device (e.g. another shop's data) —
+        // retrying can never succeed, so drop it.
+        DB.run('DELETE FROM sync_queue WHERE id = ?', [r.id]);
+      } else if (applied.has(r.id)) {
         DB.run('DELETE FROM sync_queue WHERE id = ?', [r.id]);
         if (r.entity === 'sale') DB.run('UPDATE sales SET synced = 1 WHERE id = ?', [r.entity_id]);
       } else {
@@ -85,12 +130,12 @@ window.Sync = (function () {
   // shop, not just what it rang up itself.
   const CURSOR_KEYS = ['tenants', 'products', 'variations', 'staff', 'sales', 'sale_items',
     'subscriptions', 'subscription_audit_log', 'devices'];
+  // Cursors are kept per scope (admin / each shop), since each scope sees a
+  // different slice of the cloud. A new scope starts from 0 = full download.
+  function cursorKey() { return 'sync_cursors:' + scope(); }
   function getCursors() {
-    let c = {}; try { c = JSON.parse(DB.getSetting('sync_cursors') || '{}'); } catch (e) {}
-    // Migrate the old single cursor to the catalogue tables.
-    const legacy = Number(DB.getSetting('sync_cursor') || 0);
-    const ZERO_START = ['sales', 'sale_items', 'subscriptions', 'subscription_audit_log', 'devices'];
-    CURSOR_KEYS.forEach((k) => { if (c[k] == null) c[k] = ZERO_START.includes(k) ? 0 : legacy; });
+    let c = {}; try { c = JSON.parse(DB.getSetting(cursorKey()) || '{}'); } catch (e) {}
+    CURSOR_KEYS.forEach((k) => { if (c[k] == null) c[k] = 0; });
     return c;
   }
   function maxSeq(rows, start) {
@@ -149,14 +194,14 @@ window.Sync = (function () {
       sales: Math.max(cur.sales, maxSeq(out.sales, cur.sales)),
       sale_items: Math.max(cur.sale_items, maxSeq(out.sale_items, cur.sale_items))
     };
-    DB.setSetting('sync_cursors', JSON.stringify(next));
+    DB.setSetting(cursorKey(), JSON.stringify(next));
     return { pulled: CURSOR_KEYS.reduce((n, k) => n + ((out[k] || []).length), 0) };
   }
 
   // Full refresh: pull every table from scratch. Used when a shop can't be
   // found on login, so a device that missed something still catches up.
   async function pullAll() {
-    if (!configured() || !isOnline()) return;
+    if (!configured() || !isOnline() || !authHeaders()) return;
     try {
       await pull(true);
       DB.setSetting('last_sync_at', DB.nowISO());
@@ -302,7 +347,7 @@ window.Sync = (function () {
    */
   const LICENSE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
   async function refreshLicense(force) {
-    if (!configured() || !isOnline()) return;
+    if (!configured() || !isOnline() || !authHeaders()) return;
     const tid = Config.activeTenantId();
     if (!tid) return;
     const lastCheck = Number(DB.getSetting('license_checked_at_' + tid) || 0);
@@ -322,10 +367,18 @@ window.Sync = (function () {
   }
 
   /* ---------- Orchestration ---------- */
+  let currentRun = null;
   async function run(force) {
-    if (running) return;
+    // A forced run (sign-in, "Sync now") waits for one already in flight and
+    // then runs again, so its caller sees fresh data.
+    if (running) { if (force && currentRun) { await currentRun; return run(force); } return; }
+    currentRun = runOnce(force);
+    return currentRun;
+  }
+  async function runOnce(force) {
     if (!configured()) { emit({ state: 'local-only', pending: pendingCount() }); return; }
     if (!isOnline() && !force) { emit({ state: 'offline', pending: pendingCount() }); return; }
+    if (!authHeaders()) { emit({ state: 'signin', pending: pendingCount() }); return; }
     running = true;
     emit({ state: 'syncing', pending: pendingCount() });
     try {
@@ -336,7 +389,7 @@ window.Sync = (function () {
       DB.persistNow();
       emit({ state: 'synced', pending: pendingCount(), at: DB.getSetting('last_sync_at') });
     } catch (e) {
-      emit({ state: 'error', pending: pendingCount(), error: e && e.message });
+      emit({ state: authHeaders() ? 'error' : 'signin', pending: pendingCount(), error: e && e.message });
     } finally {
       running = false;
     }
@@ -357,20 +410,40 @@ window.Sync = (function () {
     run(false);
   }
 
-  // Ping the sync API (optionally a not-yet-saved base) and report what it says.
+  // Ping the sync API (optionally a not-yet-saved base) and report who the
+  // cloud thinks this device is.
   async function test(baseOverride) {
     const base = (baseOverride != null ? baseOverride : Config.apiBase() || '').replace(/\/+$/, '');
     if (!base) throw new Error('No API base URL set');
-    const res = await fetch(base + '/api/pull?since=0', { headers: { 'Content-Type': 'application/json' } });
-    if (!res.ok) throw new Error('HTTP ' + res.status + ' from server');
-    let j;
+    const res = await fetch(base + '/api/whoami', { headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders() || {}) });
+    let j = null;
     try { j = await res.json(); } catch (e) { throw new Error('Server did not return JSON (wrong URL?)'); }
-    // A valid sync API returns the entity arrays (newer builds omit `cursor`).
-    if (!Array.isArray(j.tenants) && !('cursor' in j)) throw new Error('Unexpected response (is this the sync API?)');
-    // Count only live shops — deleted ones are kept as hidden tombstones.
-    const live = (j.tenants || []).filter((t) => (t.status || 'active') !== 'deleted');
-    return { ok: true, tenants: live.length };
+    if (res.status === 401) return { ok: true, scope: null, error: j && j.error };
+    if (!res.ok) throw new Error('HTTP ' + res.status + ' from server');
+    return { ok: true, scope: j.scope, tenant_id: j.tenant_id };
   }
 
-  return { start, run, pullAll, refreshLicense, test, queue, pendingCount, onChange, configured, isOnline };
+  /* ---------- Sign-in / sign-up / admin calls ---------- */
+  // Check a staff member's credentials with the cloud and keep the shop token.
+  async function login(shop, username, pin) {
+    const out = await apiFetch('/api/login', {
+      method: 'POST',
+      body: JSON.stringify({ shop, username, pin, device_id: Config.deviceId(), device_name: Config.deviceName() })
+    }, false);
+    DB.setSetting('sync_token_' + out.tenant_id, out.token);
+    DB.persistNow();
+    return out;
+  }
+  function signup(form) { return apiFetch('/api/signup', { method: 'POST', body: JSON.stringify(form) }, false); }
+  function listSignups() { return apiFetch('/api/signups', { method: 'GET' }); }
+  function approveSignup(id) { return apiFetch('/api/signups/approve', { method: 'POST', body: JSON.stringify({ id }) }); }
+  function rejectSignup(id) { return apiFetch('/api/signups/reject', { method: 'POST', body: JSON.stringify({ id }) }); }
+  async function shopNameAvailable(name) {
+    const out = await apiFetch('/api/shop-name-available?' + new URLSearchParams({ name, tenant_id: Config.activeTenantId() || '' }), { method: 'GET' });
+    return !!out.available;
+  }
+  function isAdminDevice() { return !!DB.getSetting('admin_key'); }
+
+  return { start, run, pullAll, refreshLicense, test, queue, pendingCount, onChange, configured, isOnline,
+    authHeaders, hasToken, login, signup, listSignups, approveSignup, rejectSignup, shopNameAvailable, isAdminDevice };
 })();
